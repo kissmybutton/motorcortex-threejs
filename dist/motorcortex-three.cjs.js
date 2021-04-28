@@ -4095,6 +4095,806 @@ function parallelTraverse(a, b, callback) {
   }
 }
 
+// Unlike TrackballControls, it maintains the "up" direction object.up (+Y by default).
+//
+//    Orbit - left mouse / touch: one-finger move
+//    Zoom - middle mouse, or mousewheel / touch: two-finger spread or squish
+//    Pan - right mouse, or left mouse + ctrl/meta/shiftKey, or arrow keys / touch: two-finger move
+
+const _changeEvent = {
+  type: 'change'
+};
+const _startEvent = {
+  type: 'start'
+};
+const _endEvent = {
+  type: 'end'
+};
+
+class OrbitControls extends EventDispatcher {
+  constructor(object, domElement) {
+    super();
+    if (domElement === undefined) console.warn('THREE.OrbitControls: The second parameter "domElement" is now mandatory.');
+    if (domElement === document) console.error('THREE.OrbitControls: "document" should not be used as the target "domElement". Please use "renderer.domElement" instead.');
+    this.object = object;
+    this.domElement = domElement; // Set to false to disable this control
+
+    this.enabled = true; // "target" sets the location of focus, where the object orbits around
+
+    this.target = new Vector3(); // How far you can dolly in and out ( PerspectiveCamera only )
+
+    this.minDistance = 0;
+    this.maxDistance = Infinity; // How far you can zoom in and out ( OrthographicCamera only )
+
+    this.minZoom = 0;
+    this.maxZoom = Infinity; // How far you can orbit vertically, upper and lower limits.
+    // Range is 0 to Math.PI radians.
+
+    this.minPolarAngle = 0; // radians
+
+    this.maxPolarAngle = Math.PI; // radians
+    // How far you can orbit horizontally, upper and lower limits.
+    // If set, the interval [ min, max ] must be a sub-interval of [ - 2 PI, 2 PI ], with ( max - min < 2 PI )
+
+    this.minAzimuthAngle = -Infinity; // radians
+
+    this.maxAzimuthAngle = Infinity; // radians
+    // Set to true to enable damping (inertia)
+    // If damping is enabled, you must call controls.update() in your animation loop
+
+    this.enableDamping = false;
+    this.dampingFactor = 0.05; // This option actually enables dollying in and out; left as "zoom" for backwards compatibility.
+    // Set to false to disable zooming
+
+    this.enableZoom = true;
+    this.zoomSpeed = 1.0; // Set to false to disable rotating
+
+    this.enableRotate = true;
+    this.rotateSpeed = 1.0; // Set to false to disable panning
+
+    this.enablePan = true;
+    this.panSpeed = 1.0;
+    this.screenSpacePanning = true; // if false, pan orthogonal to world-space direction camera.up
+
+    this.keyPanSpeed = 7.0; // pixels moved per arrow key push
+    // Set to true to automatically rotate around the target
+    // If auto-rotate is enabled, you must call controls.update() in your animation loop
+
+    this.autoRotate = false;
+    this.autoRotateSpeed = 2.0; // 30 seconds per orbit when fps is 60
+    // The four arrow keys
+
+    this.keys = {
+      LEFT: 'ArrowLeft',
+      UP: 'ArrowUp',
+      RIGHT: 'ArrowRight',
+      BOTTOM: 'ArrowDown'
+    }; // Mouse buttons
+
+    this.mouseButtons = {
+      LEFT: MOUSE.ROTATE,
+      MIDDLE: MOUSE.DOLLY,
+      RIGHT: MOUSE.PAN
+    }; // Touch fingers
+
+    this.touches = {
+      ONE: TOUCH.ROTATE,
+      TWO: TOUCH.DOLLY_PAN
+    }; // for reset
+
+    this.target0 = this.target.clone();
+    this.position0 = this.object.position.clone();
+    this.zoom0 = this.object.zoom; // the target DOM element for key events
+
+    this._domElementKeyEvents = null; //
+    // public methods
+    //
+
+    this.getPolarAngle = function () {
+      return spherical.phi;
+    };
+
+    this.getAzimuthalAngle = function () {
+      return spherical.theta;
+    };
+
+    this.listenToKeyEvents = function (domElement) {
+      domElement.addEventListener('keydown', onKeyDown);
+      this._domElementKeyEvents = domElement;
+    };
+
+    this.saveState = function () {
+      scope.target0.copy(scope.target);
+      scope.position0.copy(scope.object.position);
+      scope.zoom0 = scope.object.zoom;
+    };
+
+    this.reset = function () {
+      scope.target.copy(scope.target0);
+      scope.object.position.copy(scope.position0);
+      scope.object.zoom = scope.zoom0;
+      scope.object.updateProjectionMatrix();
+      scope.dispatchEvent(_changeEvent);
+      scope.update();
+      state = STATE.NONE;
+    }; // this method is exposed, but perhaps it would be better if we can make it private...
+
+
+    this.update = function () {
+      const offset = new Vector3(); // so camera.up is the orbit axis
+
+      const quat = new Quaternion().setFromUnitVectors(object.up, new Vector3(0, 1, 0));
+      const quatInverse = quat.clone().invert();
+      const lastPosition = new Vector3();
+      const lastQuaternion = new Quaternion();
+      const twoPI = 2 * Math.PI;
+      return function update() {
+        const position = scope.object.position;
+        offset.copy(position).sub(scope.target); // rotate offset to "y-axis-is-up" space
+
+        offset.applyQuaternion(quat); // angle from z-axis around y-axis
+
+        spherical.setFromVector3(offset);
+
+        if (scope.autoRotate && state === STATE.NONE) {
+          rotateLeft(getAutoRotationAngle());
+        }
+
+        if (scope.enableDamping) {
+          spherical.theta += sphericalDelta.theta * scope.dampingFactor;
+          spherical.phi += sphericalDelta.phi * scope.dampingFactor;
+        } else {
+          spherical.theta += sphericalDelta.theta;
+          spherical.phi += sphericalDelta.phi;
+        } // restrict theta to be between desired limits
+
+
+        let min = scope.minAzimuthAngle;
+        let max = scope.maxAzimuthAngle;
+
+        if (isFinite(min) && isFinite(max)) {
+          if (min < -Math.PI) min += twoPI;else if (min > Math.PI) min -= twoPI;
+          if (max < -Math.PI) max += twoPI;else if (max > Math.PI) max -= twoPI;
+
+          if (min <= max) {
+            spherical.theta = Math.max(min, Math.min(max, spherical.theta));
+          } else {
+            spherical.theta = spherical.theta > (min + max) / 2 ? Math.max(min, spherical.theta) : Math.min(max, spherical.theta);
+          }
+        } // restrict phi to be between desired limits
+
+
+        spherical.phi = Math.max(scope.minPolarAngle, Math.min(scope.maxPolarAngle, spherical.phi));
+        spherical.makeSafe();
+        spherical.radius *= scale; // restrict radius to be between desired limits
+
+        spherical.radius = Math.max(scope.minDistance, Math.min(scope.maxDistance, spherical.radius)); // move target to panned location
+
+        if (scope.enableDamping === true) {
+          scope.target.addScaledVector(panOffset, scope.dampingFactor);
+        } else {
+          scope.target.add(panOffset);
+        }
+
+        offset.setFromSpherical(spherical); // rotate offset back to "camera-up-vector-is-up" space
+
+        offset.applyQuaternion(quatInverse);
+        position.copy(scope.target).add(offset);
+        scope.object.lookAt(scope.target);
+
+        if (scope.enableDamping === true) {
+          sphericalDelta.theta *= 1 - scope.dampingFactor;
+          sphericalDelta.phi *= 1 - scope.dampingFactor;
+          panOffset.multiplyScalar(1 - scope.dampingFactor);
+        } else {
+          sphericalDelta.set(0, 0, 0);
+          panOffset.set(0, 0, 0);
+        }
+
+        scale = 1; // update condition is:
+        // min(camera displacement, camera rotation in radians)^2 > EPS
+        // using small-angle approximation cos(x/2) = 1 - x^2 / 8
+
+        if (zoomChanged || lastPosition.distanceToSquared(scope.object.position) > EPS || 8 * (1 - lastQuaternion.dot(scope.object.quaternion)) > EPS) {
+          scope.dispatchEvent(_changeEvent);
+          lastPosition.copy(scope.object.position);
+          lastQuaternion.copy(scope.object.quaternion);
+          zoomChanged = false;
+          return true;
+        }
+
+        return false;
+      };
+    }();
+
+    this.dispose = function () {
+      scope.domElement.removeEventListener('contextmenu', onContextMenu);
+      scope.domElement.removeEventListener('pointerdown', onPointerDown);
+      scope.domElement.removeEventListener('wheel', onMouseWheel);
+      scope.domElement.removeEventListener('touchstart', onTouchStart);
+      scope.domElement.removeEventListener('touchend', onTouchEnd);
+      scope.domElement.removeEventListener('touchmove', onTouchMove);
+      scope.domElement.ownerDocument.removeEventListener('pointermove', onPointerMove);
+      scope.domElement.ownerDocument.removeEventListener('pointerup', onPointerUp);
+
+      if (scope._domElementKeyEvents !== null) {
+        scope._domElementKeyEvents.removeEventListener('keydown', onKeyDown);
+      } //scope.dispatchEvent( { type: 'dispose' } ); // should this be added here?
+
+    }; //
+    // internals
+    //
+
+
+    const scope = this;
+    const STATE = {
+      NONE: -1,
+      ROTATE: 0,
+      DOLLY: 1,
+      PAN: 2,
+      TOUCH_ROTATE: 3,
+      TOUCH_PAN: 4,
+      TOUCH_DOLLY_PAN: 5,
+      TOUCH_DOLLY_ROTATE: 6
+    };
+    let state = STATE.NONE;
+    const EPS = 0.000001; // current position in spherical coordinates
+
+    const spherical = new Spherical();
+    const sphericalDelta = new Spherical();
+    let scale = 1;
+    const panOffset = new Vector3();
+    let zoomChanged = false;
+    const rotateStart = new Vector2();
+    const rotateEnd = new Vector2();
+    const rotateDelta = new Vector2();
+    const panStart = new Vector2();
+    const panEnd = new Vector2();
+    const panDelta = new Vector2();
+    const dollyStart = new Vector2();
+    const dollyEnd = new Vector2();
+    const dollyDelta = new Vector2();
+
+    function getAutoRotationAngle() {
+      return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
+    }
+
+    function getZoomScale() {
+      return Math.pow(0.95, scope.zoomSpeed);
+    }
+
+    function rotateLeft(angle) {
+      sphericalDelta.theta -= angle;
+    }
+
+    function rotateUp(angle) {
+      sphericalDelta.phi -= angle;
+    }
+
+    const panLeft = function () {
+      const v = new Vector3();
+      return function panLeft(distance, objectMatrix) {
+        v.setFromMatrixColumn(objectMatrix, 0); // get X column of objectMatrix
+
+        v.multiplyScalar(-distance);
+        panOffset.add(v);
+      };
+    }();
+
+    const panUp = function () {
+      const v = new Vector3();
+      return function panUp(distance, objectMatrix) {
+        if (scope.screenSpacePanning === true) {
+          v.setFromMatrixColumn(objectMatrix, 1);
+        } else {
+          v.setFromMatrixColumn(objectMatrix, 0);
+          v.crossVectors(scope.object.up, v);
+        }
+
+        v.multiplyScalar(distance);
+        panOffset.add(v);
+      };
+    }(); // deltaX and deltaY are in pixels; right and down are positive
+
+
+    const pan = function () {
+      const offset = new Vector3();
+      return function pan(deltaX, deltaY) {
+        const element = scope.domElement;
+
+        if (scope.object.isPerspectiveCamera) {
+          // perspective
+          const position = scope.object.position;
+          offset.copy(position).sub(scope.target);
+          let targetDistance = offset.length(); // half of the fov is center to top of screen
+
+          targetDistance *= Math.tan(scope.object.fov / 2 * Math.PI / 180.0); // we use only clientHeight here so aspect ratio does not distort speed
+
+          panLeft(2 * deltaX * targetDistance / element.clientHeight, scope.object.matrix);
+          panUp(2 * deltaY * targetDistance / element.clientHeight, scope.object.matrix);
+        } else if (scope.object.isOrthographicCamera) {
+          // orthographic
+          panLeft(deltaX * (scope.object.right - scope.object.left) / scope.object.zoom / element.clientWidth, scope.object.matrix);
+          panUp(deltaY * (scope.object.top - scope.object.bottom) / scope.object.zoom / element.clientHeight, scope.object.matrix);
+        } else {
+          // camera neither orthographic nor perspective
+          console.warn('WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.');
+          scope.enablePan = false;
+        }
+      };
+    }();
+
+    function dollyOut(dollyScale) {
+      if (scope.object.isPerspectiveCamera) {
+        scale /= dollyScale;
+      } else if (scope.object.isOrthographicCamera) {
+        scope.object.zoom = Math.max(scope.minZoom, Math.min(scope.maxZoom, scope.object.zoom * dollyScale));
+        scope.object.updateProjectionMatrix();
+        zoomChanged = true;
+      } else {
+        console.warn('WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.');
+        scope.enableZoom = false;
+      }
+    }
+
+    function dollyIn(dollyScale) {
+      if (scope.object.isPerspectiveCamera) {
+        scale *= dollyScale;
+      } else if (scope.object.isOrthographicCamera) {
+        scope.object.zoom = Math.max(scope.minZoom, Math.min(scope.maxZoom, scope.object.zoom / dollyScale));
+        scope.object.updateProjectionMatrix();
+        zoomChanged = true;
+      } else {
+        console.warn('WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.');
+        scope.enableZoom = false;
+      }
+    } //
+    // event callbacks - update the object state
+    //
+
+
+    function handleMouseDownRotate(event) {
+      rotateStart.set(event.clientX, event.clientY);
+    }
+
+    function handleMouseDownDolly(event) {
+      dollyStart.set(event.clientX, event.clientY);
+    }
+
+    function handleMouseDownPan(event) {
+      panStart.set(event.clientX, event.clientY);
+    }
+
+    function handleMouseMoveRotate(event) {
+      rotateEnd.set(event.clientX, event.clientY);
+      rotateDelta.subVectors(rotateEnd, rotateStart).multiplyScalar(scope.rotateSpeed);
+      const element = scope.domElement;
+      rotateLeft(2 * Math.PI * rotateDelta.x / element.clientHeight); // yes, height
+
+      rotateUp(2 * Math.PI * rotateDelta.y / element.clientHeight);
+      rotateStart.copy(rotateEnd);
+      scope.update();
+    }
+
+    function handleMouseMoveDolly(event) {
+      dollyEnd.set(event.clientX, event.clientY);
+      dollyDelta.subVectors(dollyEnd, dollyStart);
+
+      if (dollyDelta.y > 0) {
+        dollyOut(getZoomScale());
+      } else if (dollyDelta.y < 0) {
+        dollyIn(getZoomScale());
+      }
+
+      dollyStart.copy(dollyEnd);
+      scope.update();
+    }
+
+    function handleMouseMovePan(event) {
+      panEnd.set(event.clientX, event.clientY);
+      panDelta.subVectors(panEnd, panStart).multiplyScalar(scope.panSpeed);
+      pan(panDelta.x, panDelta.y);
+      panStart.copy(panEnd);
+      scope.update();
+    }
+
+    function handleMouseWheel(event) {
+      if (event.deltaY < 0) {
+        dollyIn(getZoomScale());
+      } else if (event.deltaY > 0) {
+        dollyOut(getZoomScale());
+      }
+
+      scope.update();
+    }
+
+    function handleKeyDown(event) {
+      let needsUpdate = false;
+
+      switch (event.code) {
+        case scope.keys.UP:
+          pan(0, scope.keyPanSpeed);
+          needsUpdate = true;
+          break;
+
+        case scope.keys.BOTTOM:
+          pan(0, -scope.keyPanSpeed);
+          needsUpdate = true;
+          break;
+
+        case scope.keys.LEFT:
+          pan(scope.keyPanSpeed, 0);
+          needsUpdate = true;
+          break;
+
+        case scope.keys.RIGHT:
+          pan(-scope.keyPanSpeed, 0);
+          needsUpdate = true;
+          break;
+      }
+
+      if (needsUpdate) {
+        // prevent the browser from scrolling on cursor keys
+        event.preventDefault();
+        scope.update();
+      }
+    }
+
+    function handleTouchStartRotate(event) {
+      if (event.touches.length == 1) {
+        rotateStart.set(event.touches[0].pageX, event.touches[0].pageY);
+      } else {
+        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
+        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
+        rotateStart.set(x, y);
+      }
+    }
+
+    function handleTouchStartPan(event) {
+      if (event.touches.length == 1) {
+        panStart.set(event.touches[0].pageX, event.touches[0].pageY);
+      } else {
+        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
+        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
+        panStart.set(x, y);
+      }
+    }
+
+    function handleTouchStartDolly(event) {
+      const dx = event.touches[0].pageX - event.touches[1].pageX;
+      const dy = event.touches[0].pageY - event.touches[1].pageY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      dollyStart.set(0, distance);
+    }
+
+    function handleTouchStartDollyPan(event) {
+      if (scope.enableZoom) handleTouchStartDolly(event);
+      if (scope.enablePan) handleTouchStartPan(event);
+    }
+
+    function handleTouchStartDollyRotate(event) {
+      if (scope.enableZoom) handleTouchStartDolly(event);
+      if (scope.enableRotate) handleTouchStartRotate(event);
+    }
+
+    function handleTouchMoveRotate(event) {
+      if (event.touches.length == 1) {
+        rotateEnd.set(event.touches[0].pageX, event.touches[0].pageY);
+      } else {
+        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
+        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
+        rotateEnd.set(x, y);
+      }
+
+      rotateDelta.subVectors(rotateEnd, rotateStart).multiplyScalar(scope.rotateSpeed);
+      const element = scope.domElement;
+      rotateLeft(2 * Math.PI * rotateDelta.x / element.clientHeight); // yes, height
+
+      rotateUp(2 * Math.PI * rotateDelta.y / element.clientHeight);
+      rotateStart.copy(rotateEnd);
+    }
+
+    function handleTouchMovePan(event) {
+      if (event.touches.length == 1) {
+        panEnd.set(event.touches[0].pageX, event.touches[0].pageY);
+      } else {
+        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
+        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
+        panEnd.set(x, y);
+      }
+
+      panDelta.subVectors(panEnd, panStart).multiplyScalar(scope.panSpeed);
+      pan(panDelta.x, panDelta.y);
+      panStart.copy(panEnd);
+    }
+
+    function handleTouchMoveDolly(event) {
+      const dx = event.touches[0].pageX - event.touches[1].pageX;
+      const dy = event.touches[0].pageY - event.touches[1].pageY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      dollyEnd.set(0, distance);
+      dollyDelta.set(0, Math.pow(dollyEnd.y / dollyStart.y, scope.zoomSpeed));
+      dollyOut(dollyDelta.y);
+      dollyStart.copy(dollyEnd);
+    }
+
+    function handleTouchMoveDollyPan(event) {
+      if (scope.enableZoom) handleTouchMoveDolly(event);
+      if (scope.enablePan) handleTouchMovePan(event);
+    }
+
+    function handleTouchMoveDollyRotate(event) {
+      if (scope.enableZoom) handleTouchMoveDolly(event);
+      if (scope.enableRotate) handleTouchMoveRotate(event);
+    }
+    // event handlers - FSM: listen for events and reset state
+    //
+
+
+    function onPointerDown(event) {
+      if (scope.enabled === false) return;
+
+      switch (event.pointerType) {
+        case 'mouse':
+        case 'pen':
+          onMouseDown(event);
+          break;
+        // TODO touch
+      }
+    }
+
+    function onPointerMove(event) {
+      if (scope.enabled === false) return;
+
+      switch (event.pointerType) {
+        case 'mouse':
+        case 'pen':
+          onMouseMove(event);
+          break;
+        // TODO touch
+      }
+    }
+
+    function onPointerUp(event) {
+      switch (event.pointerType) {
+        case 'mouse':
+        case 'pen':
+          onMouseUp();
+          break;
+        // TODO touch
+      }
+    }
+
+    function onMouseDown(event) {
+      // Prevent the browser from scrolling.
+      event.preventDefault(); // Manually set the focus since calling preventDefault above
+      // prevents the browser from setting it automatically.
+
+      scope.domElement.focus ? scope.domElement.focus() : window.focus();
+      let mouseAction;
+
+      switch (event.button) {
+        case 0:
+          mouseAction = scope.mouseButtons.LEFT;
+          break;
+
+        case 1:
+          mouseAction = scope.mouseButtons.MIDDLE;
+          break;
+
+        case 2:
+          mouseAction = scope.mouseButtons.RIGHT;
+          break;
+
+        default:
+          mouseAction = -1;
+      }
+
+      switch (mouseAction) {
+        case MOUSE.DOLLY:
+          if (scope.enableZoom === false) return;
+          handleMouseDownDolly(event);
+          state = STATE.DOLLY;
+          break;
+
+        case MOUSE.ROTATE:
+          if (event.ctrlKey || event.metaKey || event.shiftKey) {
+            if (scope.enablePan === false) return;
+            handleMouseDownPan(event);
+            state = STATE.PAN;
+          } else {
+            if (scope.enableRotate === false) return;
+            handleMouseDownRotate(event);
+            state = STATE.ROTATE;
+          }
+
+          break;
+
+        case MOUSE.PAN:
+          if (event.ctrlKey || event.metaKey || event.shiftKey) {
+            if (scope.enableRotate === false) return;
+            handleMouseDownRotate(event);
+            state = STATE.ROTATE;
+          } else {
+            if (scope.enablePan === false) return;
+            handleMouseDownPan(event);
+            state = STATE.PAN;
+          }
+
+          break;
+
+        default:
+          state = STATE.NONE;
+      }
+
+      if (state !== STATE.NONE) {
+        scope.domElement.ownerDocument.addEventListener('pointermove', onPointerMove);
+        scope.domElement.ownerDocument.addEventListener('pointerup', onPointerUp);
+        scope.dispatchEvent(_startEvent);
+      }
+    }
+
+    function onMouseMove(event) {
+      if (scope.enabled === false) return;
+      event.preventDefault();
+
+      switch (state) {
+        case STATE.ROTATE:
+          if (scope.enableRotate === false) return;
+          handleMouseMoveRotate(event);
+          break;
+
+        case STATE.DOLLY:
+          if (scope.enableZoom === false) return;
+          handleMouseMoveDolly(event);
+          break;
+
+        case STATE.PAN:
+          if (scope.enablePan === false) return;
+          handleMouseMovePan(event);
+          break;
+      }
+    }
+
+    function onMouseUp(event) {
+      scope.domElement.ownerDocument.removeEventListener('pointermove', onPointerMove);
+      scope.domElement.ownerDocument.removeEventListener('pointerup', onPointerUp);
+      if (scope.enabled === false) return;
+      scope.dispatchEvent(_endEvent);
+      state = STATE.NONE;
+    }
+
+    function onMouseWheel(event) {
+      if (scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE && state !== STATE.ROTATE) return;
+      event.preventDefault();
+      scope.dispatchEvent(_startEvent);
+      handleMouseWheel(event);
+      scope.dispatchEvent(_endEvent);
+    }
+
+    function onKeyDown(event) {
+      if (scope.enabled === false || scope.enablePan === false) return;
+      handleKeyDown(event);
+    }
+
+    function onTouchStart(event) {
+      if (scope.enabled === false) return;
+      event.preventDefault(); // prevent scrolling
+
+      switch (event.touches.length) {
+        case 1:
+          switch (scope.touches.ONE) {
+            case TOUCH.ROTATE:
+              if (scope.enableRotate === false) return;
+              handleTouchStartRotate(event);
+              state = STATE.TOUCH_ROTATE;
+              break;
+
+            case TOUCH.PAN:
+              if (scope.enablePan === false) return;
+              handleTouchStartPan(event);
+              state = STATE.TOUCH_PAN;
+              break;
+
+            default:
+              state = STATE.NONE;
+          }
+
+          break;
+
+        case 2:
+          switch (scope.touches.TWO) {
+            case TOUCH.DOLLY_PAN:
+              if (scope.enableZoom === false && scope.enablePan === false) return;
+              handleTouchStartDollyPan(event);
+              state = STATE.TOUCH_DOLLY_PAN;
+              break;
+
+            case TOUCH.DOLLY_ROTATE:
+              if (scope.enableZoom === false && scope.enableRotate === false) return;
+              handleTouchStartDollyRotate(event);
+              state = STATE.TOUCH_DOLLY_ROTATE;
+              break;
+
+            default:
+              state = STATE.NONE;
+          }
+
+          break;
+
+        default:
+          state = STATE.NONE;
+      }
+
+      if (state !== STATE.NONE) {
+        scope.dispatchEvent(_startEvent);
+      }
+    }
+
+    function onTouchMove(event) {
+      if (scope.enabled === false) return;
+      event.preventDefault(); // prevent scrolling
+
+      switch (state) {
+        case STATE.TOUCH_ROTATE:
+          if (scope.enableRotate === false) return;
+          handleTouchMoveRotate(event);
+          scope.update();
+          break;
+
+        case STATE.TOUCH_PAN:
+          if (scope.enablePan === false) return;
+          handleTouchMovePan(event);
+          scope.update();
+          break;
+
+        case STATE.TOUCH_DOLLY_PAN:
+          if (scope.enableZoom === false && scope.enablePan === false) return;
+          handleTouchMoveDollyPan(event);
+          scope.update();
+          break;
+
+        case STATE.TOUCH_DOLLY_ROTATE:
+          if (scope.enableZoom === false && scope.enableRotate === false) return;
+          handleTouchMoveDollyRotate(event);
+          scope.update();
+          break;
+
+        default:
+          state = STATE.NONE;
+      }
+    }
+
+    function onTouchEnd(event) {
+      if (scope.enabled === false) return;
+      scope.dispatchEvent(_endEvent);
+      state = STATE.NONE;
+    }
+
+    function onContextMenu(event) {
+      if (scope.enabled === false) return;
+      event.preventDefault();
+    } //
+
+
+    scope.domElement.addEventListener('contextmenu', onContextMenu);
+    scope.domElement.addEventListener('pointerdown', onPointerDown);
+    scope.domElement.addEventListener('wheel', onMouseWheel, {
+      passive: false
+    });
+    scope.domElement.addEventListener('touchstart', onTouchStart, {
+      passive: false
+    });
+    scope.domElement.addEventListener('touchend', onTouchEnd);
+    scope.domElement.addEventListener('touchmove', onTouchMove, {
+      passive: false
+    }); // force an update at start
+
+    this.update();
+  }
+
+} // This set of controls performs orbiting, dollying (zooming), and panning.
+
 /*!
 fflate - fast JavaScript compression/decompression
 <https://101arrowz.github.io/fflate>
@@ -10324,6 +11124,450 @@ function inject(a1, index, a2) {
   return a1.slice(0, index).concat(a2).concat(a1.slice(index));
 }
 
+const _taskCache = new WeakMap();
+
+class DRACOLoader extends Loader {
+  constructor(manager) {
+    super(manager);
+    this.decoderPath = '';
+    this.decoderConfig = {};
+    this.decoderBinary = null;
+    this.decoderPending = null;
+    this.workerLimit = 4;
+    this.workerPool = [];
+    this.workerNextTaskID = 1;
+    this.workerSourceURL = '';
+    this.defaultAttributeIDs = {
+      position: 'POSITION',
+      normal: 'NORMAL',
+      color: 'COLOR',
+      uv: 'TEX_COORD'
+    };
+    this.defaultAttributeTypes = {
+      position: 'Float32Array',
+      normal: 'Float32Array',
+      color: 'Float32Array',
+      uv: 'Float32Array'
+    };
+  }
+
+  setDecoderPath(path) {
+    this.decoderPath = path;
+    return this;
+  }
+
+  setDecoderConfig(config) {
+    this.decoderConfig = config;
+    return this;
+  }
+
+  setWorkerLimit(workerLimit) {
+    this.workerLimit = workerLimit;
+    return this;
+  }
+
+  load(url, onLoad, onProgress, onError) {
+    const loader = new FileLoader(this.manager);
+    loader.setPath(this.path);
+    loader.setResponseType('arraybuffer');
+    loader.setRequestHeader(this.requestHeader);
+    loader.setWithCredentials(this.withCredentials);
+    loader.load(url, buffer => {
+      const taskConfig = {
+        attributeIDs: this.defaultAttributeIDs,
+        attributeTypes: this.defaultAttributeTypes,
+        useUniqueIDs: false
+      };
+      this.decodeGeometry(buffer, taskConfig).then(onLoad).catch(onError);
+    }, onProgress, onError);
+  }
+  /** @deprecated Kept for backward-compatibility with previous DRACOLoader versions. */
+
+
+  decodeDracoFile(buffer, callback, attributeIDs, attributeTypes) {
+    const taskConfig = {
+      attributeIDs: attributeIDs || this.defaultAttributeIDs,
+      attributeTypes: attributeTypes || this.defaultAttributeTypes,
+      useUniqueIDs: !!attributeIDs
+    };
+    this.decodeGeometry(buffer, taskConfig).then(callback);
+  }
+
+  decodeGeometry(buffer, taskConfig) {
+    // TODO: For backward-compatibility, support 'attributeTypes' objects containing
+    // references (rather than names) to typed array constructors. These must be
+    // serialized before sending them to the worker.
+    for (const attribute in taskConfig.attributeTypes) {
+      const type = taskConfig.attributeTypes[attribute];
+
+      if (type.BYTES_PER_ELEMENT !== undefined) {
+        taskConfig.attributeTypes[attribute] = type.name;
+      }
+    } //
+
+
+    const taskKey = JSON.stringify(taskConfig); // Check for an existing task using this buffer. A transferred buffer cannot be transferred
+    // again from this thread.
+
+    if (_taskCache.has(buffer)) {
+      const cachedTask = _taskCache.get(buffer);
+
+      if (cachedTask.key === taskKey) {
+        return cachedTask.promise;
+      } else if (buffer.byteLength === 0) {
+        // Technically, it would be possible to wait for the previous task to complete,
+        // transfer the buffer back, and decode again with the second configuration. That
+        // is complex, and I don't know of any reason to decode a Draco buffer twice in
+        // different ways, so this is left unimplemented.
+        throw new Error('THREE.DRACOLoader: Unable to re-decode a buffer with different ' + 'settings. Buffer has already been transferred.');
+      }
+    } //
+
+
+    let worker;
+    const taskID = this.workerNextTaskID++;
+    const taskCost = buffer.byteLength; // Obtain a worker and assign a task, and construct a geometry instance
+    // when the task completes.
+
+    const geometryPending = this._getWorker(taskID, taskCost).then(_worker => {
+      worker = _worker;
+      return new Promise((resolve, reject) => {
+        worker._callbacks[taskID] = {
+          resolve,
+          reject
+        };
+        worker.postMessage({
+          type: 'decode',
+          id: taskID,
+          taskConfig,
+          buffer
+        }, [buffer]); // this.debug();
+      });
+    }).then(message => this._createGeometry(message.geometry)); // Remove task from the task list.
+    // Note: replaced '.finally()' with '.catch().then()' block - iOS 11 support (#19416)
+
+
+    geometryPending.catch(() => true).then(() => {
+      if (worker && taskID) {
+        this._releaseTask(worker, taskID); // this.debug();
+
+      }
+    }); // Cache the task result.
+
+    _taskCache.set(buffer, {
+      key: taskKey,
+      promise: geometryPending
+    });
+
+    return geometryPending;
+  }
+
+  _createGeometry(geometryData) {
+    const geometry = new BufferGeometry();
+
+    if (geometryData.index) {
+      geometry.setIndex(new BufferAttribute(geometryData.index.array, 1));
+    }
+
+    for (let i = 0; i < geometryData.attributes.length; i++) {
+      const attribute = geometryData.attributes[i];
+      const name = attribute.name;
+      const array = attribute.array;
+      const itemSize = attribute.itemSize;
+      geometry.setAttribute(name, new BufferAttribute(array, itemSize));
+    }
+
+    return geometry;
+  }
+
+  _loadLibrary(url, responseType) {
+    const loader = new FileLoader(this.manager);
+    loader.setPath(this.decoderPath);
+    loader.setResponseType(responseType);
+    loader.setWithCredentials(this.withCredentials);
+    return new Promise((resolve, reject) => {
+      loader.load(url, resolve, undefined, reject);
+    });
+  }
+
+  preload() {
+    this._initDecoder();
+
+    return this;
+  }
+
+  _initDecoder() {
+    if (this.decoderPending) return this.decoderPending;
+    const useJS = typeof WebAssembly !== 'object' || this.decoderConfig.type === 'js';
+    const librariesPending = [];
+
+    if (useJS) {
+      librariesPending.push(this._loadLibrary('draco_decoder.js', 'text'));
+    } else {
+      librariesPending.push(this._loadLibrary('draco_wasm_wrapper.js', 'text'));
+      librariesPending.push(this._loadLibrary('draco_decoder.wasm', 'arraybuffer'));
+    }
+
+    this.decoderPending = Promise.all(librariesPending).then(libraries => {
+      const jsContent = libraries[0];
+
+      if (!useJS) {
+        this.decoderConfig.wasmBinary = libraries[1];
+      }
+
+      const fn = DRACOWorker.toString();
+      const body = ['/* draco decoder */', jsContent, '', '/* worker */', fn.substring(fn.indexOf('{') + 1, fn.lastIndexOf('}'))].join('\n');
+      this.workerSourceURL = URL.createObjectURL(new Blob([body]));
+    });
+    return this.decoderPending;
+  }
+
+  _getWorker(taskID, taskCost) {
+    return this._initDecoder().then(() => {
+      if (this.workerPool.length < this.workerLimit) {
+        const worker = new Worker(this.workerSourceURL);
+        worker._callbacks = {};
+        worker._taskCosts = {};
+        worker._taskLoad = 0;
+        worker.postMessage({
+          type: 'init',
+          decoderConfig: this.decoderConfig
+        });
+
+        worker.onmessage = function (e) {
+          const message = e.data;
+
+          switch (message.type) {
+            case 'decode':
+              worker._callbacks[message.id].resolve(message);
+
+              break;
+
+            case 'error':
+              worker._callbacks[message.id].reject(message);
+
+              break;
+
+            default:
+              console.error('THREE.DRACOLoader: Unexpected message, "' + message.type + '"');
+          }
+        };
+
+        this.workerPool.push(worker);
+      } else {
+        this.workerPool.sort(function (a, b) {
+          return a._taskLoad > b._taskLoad ? -1 : 1;
+        });
+      }
+
+      const worker = this.workerPool[this.workerPool.length - 1];
+      worker._taskCosts[taskID] = taskCost;
+      worker._taskLoad += taskCost;
+      return worker;
+    });
+  }
+
+  _releaseTask(worker, taskID) {
+    worker._taskLoad -= worker._taskCosts[taskID];
+    delete worker._callbacks[taskID];
+    delete worker._taskCosts[taskID];
+  }
+
+  debug() {
+    console.log('Task load: ', this.workerPool.map(worker => worker._taskLoad));
+  }
+
+  dispose() {
+    for (let i = 0; i < this.workerPool.length; ++i) {
+      this.workerPool[i].terminate();
+    }
+
+    this.workerPool.length = 0;
+    return this;
+  }
+
+}
+/* WEB WORKER */
+
+
+function DRACOWorker() {
+  let decoderConfig;
+  let decoderPending;
+
+  onmessage = function (e) {
+    const message = e.data;
+
+    switch (message.type) {
+      case 'init':
+        decoderConfig = message.decoderConfig;
+        decoderPending = new Promise(function (resolve
+        /*, reject*/
+        ) {
+          decoderConfig.onModuleLoaded = function (draco) {
+            // Module is Promise-like. Wrap before resolving to avoid loop.
+            resolve({
+              draco: draco
+            });
+          };
+
+          DracoDecoderModule(decoderConfig); // eslint-disable-line no-undef
+        });
+        break;
+
+      case 'decode':
+        const buffer = message.buffer;
+        const taskConfig = message.taskConfig;
+        decoderPending.then(module => {
+          const draco = module.draco;
+          const decoder = new draco.Decoder();
+          const decoderBuffer = new draco.DecoderBuffer();
+          decoderBuffer.Init(new Int8Array(buffer), buffer.byteLength);
+
+          try {
+            const geometry = decodeGeometry(draco, decoder, decoderBuffer, taskConfig);
+            const buffers = geometry.attributes.map(attr => attr.array.buffer);
+            if (geometry.index) buffers.push(geometry.index.array.buffer);
+            self.postMessage({
+              type: 'decode',
+              id: message.id,
+              geometry
+            }, buffers);
+          } catch (error) {
+            console.error(error);
+            self.postMessage({
+              type: 'error',
+              id: message.id,
+              error: error.message
+            });
+          } finally {
+            draco.destroy(decoderBuffer);
+            draco.destroy(decoder);
+          }
+        });
+        break;
+    }
+  };
+
+  function decodeGeometry(draco, decoder, decoderBuffer, taskConfig) {
+    const attributeIDs = taskConfig.attributeIDs;
+    const attributeTypes = taskConfig.attributeTypes;
+    let dracoGeometry;
+    let decodingStatus;
+    const geometryType = decoder.GetEncodedGeometryType(decoderBuffer);
+
+    if (geometryType === draco.TRIANGULAR_MESH) {
+      dracoGeometry = new draco.Mesh();
+      decodingStatus = decoder.DecodeBufferToMesh(decoderBuffer, dracoGeometry);
+    } else if (geometryType === draco.POINT_CLOUD) {
+      dracoGeometry = new draco.PointCloud();
+      decodingStatus = decoder.DecodeBufferToPointCloud(decoderBuffer, dracoGeometry);
+    } else {
+      throw new Error('THREE.DRACOLoader: Unexpected geometry type.');
+    }
+
+    if (!decodingStatus.ok() || dracoGeometry.ptr === 0) {
+      throw new Error('THREE.DRACOLoader: Decoding failed: ' + decodingStatus.error_msg());
+    }
+
+    const geometry = {
+      index: null,
+      attributes: []
+    }; // Gather all vertex attributes.
+
+    for (const attributeName in attributeIDs) {
+      const attributeType = self[attributeTypes[attributeName]];
+      let attribute;
+      let attributeID; // A Draco file may be created with default vertex attributes, whose attribute IDs
+      // are mapped 1:1 from their semantic name (POSITION, NORMAL, ...). Alternatively,
+      // a Draco file may contain a custom set of attributes, identified by known unique
+      // IDs. glTF files always do the latter, and `.drc` files typically do the former.
+
+      if (taskConfig.useUniqueIDs) {
+        attributeID = attributeIDs[attributeName];
+        attribute = decoder.GetAttributeByUniqueId(dracoGeometry, attributeID);
+      } else {
+        attributeID = decoder.GetAttributeId(dracoGeometry, draco[attributeIDs[attributeName]]);
+        if (attributeID === -1) continue;
+        attribute = decoder.GetAttribute(dracoGeometry, attributeID);
+      }
+
+      geometry.attributes.push(decodeAttribute(draco, decoder, dracoGeometry, attributeName, attributeType, attribute));
+    } // Add index.
+
+
+    if (geometryType === draco.TRIANGULAR_MESH) {
+      geometry.index = decodeIndex(draco, decoder, dracoGeometry);
+    }
+
+    draco.destroy(dracoGeometry);
+    return geometry;
+  }
+
+  function decodeIndex(draco, decoder, dracoGeometry) {
+    const numFaces = dracoGeometry.num_faces();
+    const numIndices = numFaces * 3;
+    const byteLength = numIndices * 4;
+
+    const ptr = draco._malloc(byteLength);
+
+    decoder.GetTrianglesUInt32Array(dracoGeometry, byteLength, ptr);
+    const index = new Uint32Array(draco.HEAPF32.buffer, ptr, numIndices).slice();
+
+    draco._free(ptr);
+
+    return {
+      array: index,
+      itemSize: 1
+    };
+  }
+
+  function decodeAttribute(draco, decoder, dracoGeometry, attributeName, attributeType, attribute) {
+    const numComponents = attribute.num_components();
+    const numPoints = dracoGeometry.num_points();
+    const numValues = numPoints * numComponents;
+    const byteLength = numValues * attributeType.BYTES_PER_ELEMENT;
+    const dataType = getDracoDataType(draco, attributeType);
+
+    const ptr = draco._malloc(byteLength);
+
+    decoder.GetAttributeDataArrayForAllPoints(dracoGeometry, attribute, dataType, byteLength, ptr);
+    const array = new attributeType(draco.HEAPF32.buffer, ptr, numValues).slice();
+
+    draco._free(ptr);
+
+    return {
+      name: attributeName,
+      array: array,
+      itemSize: numComponents
+    };
+  }
+
+  function getDracoDataType(draco, attributeType) {
+    switch (attributeType) {
+      case Float32Array:
+        return draco.DT_FLOAT32;
+
+      case Int8Array:
+        return draco.DT_INT8;
+
+      case Int16Array:
+        return draco.DT_INT16;
+
+      case Int32Array:
+        return draco.DT_INT32;
+
+      case Uint8Array:
+        return draco.DT_UINT8;
+
+      case Uint16Array:
+        return draco.DT_UINT16;
+
+      case Uint32Array:
+        return draco.DT_UINT32;
+    }
+  }
+}
+
 class GLTFLoader extends Loader {
   constructor(manager) {
     super(manager);
@@ -13115,1254 +14359,206 @@ function toTrianglesDrawMode(geometry, drawMode) {
   return newGeometry;
 }
 
-const _taskCache = new WeakMap();
-
-class DRACOLoader extends Loader {
-  constructor(manager) {
-    super(manager);
-    this.decoderPath = '';
-    this.decoderConfig = {};
-    this.decoderBinary = null;
-    this.decoderPending = null;
-    this.workerLimit = 4;
-    this.workerPool = [];
-    this.workerNextTaskID = 1;
-    this.workerSourceURL = '';
-    this.defaultAttributeIDs = {
-      position: 'POSITION',
-      normal: 'NORMAL',
-      color: 'COLOR',
-      uv: 'TEX_COORD'
-    };
-    this.defaultAttributeTypes = {
-      position: 'Float32Array',
-      normal: 'Float32Array',
-      color: 'Float32Array',
-      uv: 'Float32Array'
-    };
-  }
-
-  setDecoderPath(path) {
-    this.decoderPath = path;
-    return this;
-  }
-
-  setDecoderConfig(config) {
-    this.decoderConfig = config;
-    return this;
-  }
-
-  setWorkerLimit(workerLimit) {
-    this.workerLimit = workerLimit;
-    return this;
-  }
-
-  load(url, onLoad, onProgress, onError) {
-    const loader = new FileLoader(this.manager);
-    loader.setPath(this.path);
-    loader.setResponseType('arraybuffer');
-    loader.setRequestHeader(this.requestHeader);
-    loader.setWithCredentials(this.withCredentials);
-    loader.load(url, buffer => {
-      const taskConfig = {
-        attributeIDs: this.defaultAttributeIDs,
-        attributeTypes: this.defaultAttributeTypes,
-        useUniqueIDs: false
-      };
-      this.decodeGeometry(buffer, taskConfig).then(onLoad).catch(onError);
-    }, onProgress, onError);
-  }
-  /** @deprecated Kept for backward-compatibility with previous DRACOLoader versions. */
-
-
-  decodeDracoFile(buffer, callback, attributeIDs, attributeTypes) {
-    const taskConfig = {
-      attributeIDs: attributeIDs || this.defaultAttributeIDs,
-      attributeTypes: attributeTypes || this.defaultAttributeTypes,
-      useUniqueIDs: !!attributeIDs
-    };
-    this.decodeGeometry(buffer, taskConfig).then(callback);
-  }
-
-  decodeGeometry(buffer, taskConfig) {
-    // TODO: For backward-compatibility, support 'attributeTypes' objects containing
-    // references (rather than names) to typed array constructors. These must be
-    // serialized before sending them to the worker.
-    for (const attribute in taskConfig.attributeTypes) {
-      const type = taskConfig.attributeTypes[attribute];
-
-      if (type.BYTES_PER_ELEMENT !== undefined) {
-        taskConfig.attributeTypes[attribute] = type.name;
-      }
-    } //
-
-
-    const taskKey = JSON.stringify(taskConfig); // Check for an existing task using this buffer. A transferred buffer cannot be transferred
-    // again from this thread.
-
-    if (_taskCache.has(buffer)) {
-      const cachedTask = _taskCache.get(buffer);
-
-      if (cachedTask.key === taskKey) {
-        return cachedTask.promise;
-      } else if (buffer.byteLength === 0) {
-        // Technically, it would be possible to wait for the previous task to complete,
-        // transfer the buffer back, and decode again with the second configuration. That
-        // is complex, and I don't know of any reason to decode a Draco buffer twice in
-        // different ways, so this is left unimplemented.
-        throw new Error('THREE.DRACOLoader: Unable to re-decode a buffer with different ' + 'settings. Buffer has already been transferred.');
-      }
-    } //
-
-
-    let worker;
-    const taskID = this.workerNextTaskID++;
-    const taskCost = buffer.byteLength; // Obtain a worker and assign a task, and construct a geometry instance
-    // when the task completes.
-
-    const geometryPending = this._getWorker(taskID, taskCost).then(_worker => {
-      worker = _worker;
-      return new Promise((resolve, reject) => {
-        worker._callbacks[taskID] = {
-          resolve,
-          reject
-        };
-        worker.postMessage({
-          type: 'decode',
-          id: taskID,
-          taskConfig,
-          buffer
-        }, [buffer]); // this.debug();
-      });
-    }).then(message => this._createGeometry(message.geometry)); // Remove task from the task list.
-    // Note: replaced '.finally()' with '.catch().then()' block - iOS 11 support (#19416)
-
-
-    geometryPending.catch(() => true).then(() => {
-      if (worker && taskID) {
-        this._releaseTask(worker, taskID); // this.debug();
-
-      }
-    }); // Cache the task result.
-
-    _taskCache.set(buffer, {
-      key: taskKey,
-      promise: geometryPending
-    });
-
-    return geometryPending;
-  }
-
-  _createGeometry(geometryData) {
-    const geometry = new BufferGeometry();
-
-    if (geometryData.index) {
-      geometry.setIndex(new BufferAttribute(geometryData.index.array, 1));
-    }
-
-    for (let i = 0; i < geometryData.attributes.length; i++) {
-      const attribute = geometryData.attributes[i];
-      const name = attribute.name;
-      const array = attribute.array;
-      const itemSize = attribute.itemSize;
-      geometry.setAttribute(name, new BufferAttribute(array, itemSize));
-    }
-
-    return geometry;
-  }
-
-  _loadLibrary(url, responseType) {
-    const loader = new FileLoader(this.manager);
-    loader.setPath(this.decoderPath);
-    loader.setResponseType(responseType);
-    loader.setWithCredentials(this.withCredentials);
-    return new Promise((resolve, reject) => {
-      loader.load(url, resolve, undefined, reject);
+var loaders = {
+  FBXLoader: function FBXLoader$1(url, _f) {
+    var loader = new FBXLoader();
+    loader.load(url, _f);
+  },
+  GLTFLoader: function GLTFLoader$1(url, _f) {
+    var loader = new GLTFLoader();
+    var dracoLoader = new DRACOLoader();
+    loader.setDRACOLoader(dracoLoader);
+    loader.load(url, function (gltf) {
+      gltf.scene.animations = gltf.animations;
+      return _f(gltf.scene);
     });
   }
+};
 
-  preload() {
-    this._initDecoder();
-
-    return this;
-  }
-
-  _initDecoder() {
-    if (this.decoderPending) return this.decoderPending;
-    const useJS = typeof WebAssembly !== 'object' || this.decoderConfig.type === 'js';
-    const librariesPending = [];
-
-    if (useJS) {
-      librariesPending.push(this._loadLibrary('draco_decoder.js', 'text'));
-    } else {
-      librariesPending.push(this._loadLibrary('draco_wasm_wrapper.js', 'text'));
-      librariesPending.push(this._loadLibrary('draco_decoder.wasm', 'arraybuffer'));
+var applySettingsToObjects = function applySettingsToObjects(settings, obj) {
+  for (var key in settings) {
+    if (settings[key] instanceof Array) {
+      obj[key].apply(obj, _toConsumableArray(settings[key]));
+      continue;
+    } else if (settings[key] !== Object(settings[key])) {
+      // is primitive
+      obj[key] = settings[key];
+      continue;
     }
 
-    this.decoderPending = Promise.all(librariesPending).then(libraries => {
-      const jsContent = libraries[0];
-
-      if (!useJS) {
-        this.decoderConfig.wasmBinary = libraries[1];
-      }
-
-      const fn = DRACOWorker.toString();
-      const body = ['/* draco decoder */', jsContent, '', '/* worker */', fn.substring(fn.indexOf('{') + 1, fn.lastIndexOf('}'))].join('\n');
-      this.workerSourceURL = URL.createObjectURL(new Blob([body]));
-    });
-    return this.decoderPending;
+    applySettingsToObjects(settings[key], obj[key]);
   }
+};
+var enableControlEvents = function enableControlEvents(_this) {
+  var raycaster = new Raycaster();
+  var mouse = new Vector2();
 
-  _getWorker(taskID, taskCost) {
-    return this._initDecoder().then(() => {
-      if (this.workerPool.length < this.workerLimit) {
-        const worker = new Worker(this.workerSourceURL);
-        worker._callbacks = {};
-        worker._taskCosts = {};
-        worker._taskLoad = 0;
-        worker.postMessage({
-          type: 'init',
-          decoderConfig: this.decoderConfig
-        });
+  var onMouseMove = function onMouseMove(event) {
+    // calculate mouse position in normalized device coordinates
+    // (-1 to +1) for both components
+    mouse.x = event.clientX / window.innerWidth * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
-        worker.onmessage = function (e) {
-          const message = e.data;
+    var camera = _this.getObject(_this.attributes.renders[0].camera);
 
-          switch (message.type) {
-            case 'decode':
-              worker._callbacks[message.id].resolve(message);
+    raycaster.setFromCamera(mouse, camera);
 
-              break;
-
-            case 'error':
-              worker._callbacks[message.id].reject(message);
-
-              break;
-
-            default:
-              console.error('THREE.DRACOLoader: Unexpected message, "' + message.type + '"');
-          }
-        };
-
-        this.workerPool.push(worker);
-      } else {
-        this.workerPool.sort(function (a, b) {
-          return a._taskLoad > b._taskLoad ? -1 : 1;
-        });
-      }
-
-      const worker = this.workerPool[this.workerPool.length - 1];
-      worker._taskCosts[taskID] = taskCost;
-      worker._taskLoad += taskCost;
-      return worker;
-    });
-  }
-
-  _releaseTask(worker, taskID) {
-    worker._taskLoad -= worker._taskCosts[taskID];
-    delete worker._callbacks[taskID];
-    delete worker._taskCosts[taskID];
-  }
-
-  debug() {
-    console.log('Task load: ', this.workerPool.map(worker => worker._taskLoad));
-  }
-
-  dispose() {
-    for (let i = 0; i < this.workerPool.length; ++i) {
-      this.workerPool[i].terminate();
-    }
-
-    this.workerPool.length = 0;
-    return this;
-  }
-
-}
-/* WEB WORKER */
+    var scene = _this.getObject(_this.attributes.renders[0].scene); // calculate objects intersecting the picking ray
 
 
-function DRACOWorker() {
-  let decoderConfig;
-  let decoderPending;
-
-  onmessage = function (e) {
-    const message = e.data;
-
-    switch (message.type) {
-      case 'init':
-        decoderConfig = message.decoderConfig;
-        decoderPending = new Promise(function (resolve
-        /*, reject*/
-        ) {
-          decoderConfig.onModuleLoaded = function (draco) {
-            // Module is Promise-like. Wrap before resolving to avoid loop.
-            resolve({
-              draco: draco
-            });
-          };
-
-          DracoDecoderModule(decoderConfig); // eslint-disable-line no-undef
-        });
-        break;
-
-      case 'decode':
-        const buffer = message.buffer;
-        const taskConfig = message.taskConfig;
-        decoderPending.then(module => {
-          const draco = module.draco;
-          const decoder = new draco.Decoder();
-          const decoderBuffer = new draco.DecoderBuffer();
-          decoderBuffer.Init(new Int8Array(buffer), buffer.byteLength);
-
-          try {
-            const geometry = decodeGeometry(draco, decoder, decoderBuffer, taskConfig);
-            const buffers = geometry.attributes.map(attr => attr.array.buffer);
-            if (geometry.index) buffers.push(geometry.index.array.buffer);
-            self.postMessage({
-              type: 'decode',
-              id: message.id,
-              geometry
-            }, buffers);
-          } catch (error) {
-            console.error(error);
-            self.postMessage({
-              type: 'error',
-              id: message.id,
-              error: error.message
-            });
-          } finally {
-            draco.destroy(decoderBuffer);
-            draco.destroy(decoder);
-          }
-        });
-        break;
-    }
+    var intersects = raycaster.intersectObjects(scene.children, true);
+    console.log("INTERSECTIONS", intersects);
+    console.log("CAMERA POSITION", camera.position);
   };
 
-  function decodeGeometry(draco, decoder, decoderBuffer, taskConfig) {
-    const attributeIDs = taskConfig.attributeIDs;
-    const attributeTypes = taskConfig.attributeTypes;
-    let dracoGeometry;
-    let decodingStatus;
-    const geometryType = decoder.GetEncodedGeometryType(decoderBuffer);
-
-    if (geometryType === draco.TRIANGULAR_MESH) {
-      dracoGeometry = new draco.Mesh();
-      decodingStatus = decoder.DecodeBufferToMesh(decoderBuffer, dracoGeometry);
-    } else if (geometryType === draco.POINT_CLOUD) {
-      dracoGeometry = new draco.PointCloud();
-      decodingStatus = decoder.DecodeBufferToPointCloud(decoderBuffer, dracoGeometry);
-    } else {
-      throw new Error('THREE.DRACOLoader: Unexpected geometry type.');
-    }
-
-    if (!decodingStatus.ok() || dracoGeometry.ptr === 0) {
-      throw new Error('THREE.DRACOLoader: Decoding failed: ' + decodingStatus.error_msg());
-    }
-
-    const geometry = {
-      index: null,
-      attributes: []
-    }; // Gather all vertex attributes.
-
-    for (const attributeName in attributeIDs) {
-      const attributeType = self[attributeTypes[attributeName]];
-      let attribute;
-      let attributeID; // A Draco file may be created with default vertex attributes, whose attribute IDs
-      // are mapped 1:1 from their semantic name (POSITION, NORMAL, ...). Alternatively,
-      // a Draco file may contain a custom set of attributes, identified by known unique
-      // IDs. glTF files always do the latter, and `.drc` files typically do the former.
-
-      if (taskConfig.useUniqueIDs) {
-        attributeID = attributeIDs[attributeName];
-        attribute = decoder.GetAttributeByUniqueId(dracoGeometry, attributeID);
-      } else {
-        attributeID = decoder.GetAttributeId(dracoGeometry, draco[attributeIDs[attributeName]]);
-        if (attributeID === -1) continue;
-        attribute = decoder.GetAttribute(dracoGeometry, attributeID);
-      }
-
-      geometry.attributes.push(decodeAttribute(draco, decoder, dracoGeometry, attributeName, attributeType, attribute));
-    } // Add index.
-
-
-    if (geometryType === draco.TRIANGULAR_MESH) {
-      geometry.index = decodeIndex(draco, decoder, dracoGeometry);
-    }
-
-    draco.destroy(dracoGeometry);
-    return geometry;
-  }
-
-  function decodeIndex(draco, decoder, dracoGeometry) {
-    const numFaces = dracoGeometry.num_faces();
-    const numIndices = numFaces * 3;
-    const byteLength = numIndices * 4;
-
-    const ptr = draco._malloc(byteLength);
-
-    decoder.GetTrianglesUInt32Array(dracoGeometry, byteLength, ptr);
-    const index = new Uint32Array(draco.HEAPF32.buffer, ptr, numIndices).slice();
-
-    draco._free(ptr);
-
-    return {
-      array: index,
-      itemSize: 1
-    };
-  }
-
-  function decodeAttribute(draco, decoder, dracoGeometry, attributeName, attributeType, attribute) {
-    const numComponents = attribute.num_components();
-    const numPoints = dracoGeometry.num_points();
-    const numValues = numPoints * numComponents;
-    const byteLength = numValues * attributeType.BYTES_PER_ELEMENT;
-    const dataType = getDracoDataType(draco, attributeType);
-
-    const ptr = draco._malloc(byteLength);
-
-    decoder.GetAttributeDataArrayForAllPoints(dracoGeometry, attribute, dataType, byteLength, ptr);
-    const array = new attributeType(draco.HEAPF32.buffer, ptr, numValues).slice();
-
-    draco._free(ptr);
-
-    return {
-      name: attributeName,
-      array: array,
-      itemSize: numComponents
-    };
-  }
-
-  function getDracoDataType(draco, attributeType) {
-    switch (attributeType) {
-      case Float32Array:
-        return draco.DT_FLOAT32;
-
-      case Int8Array:
-        return draco.DT_INT8;
-
-      case Int16Array:
-        return draco.DT_INT16;
-
-      case Int32Array:
-        return draco.DT_INT32;
-
-      case Uint8Array:
-        return draco.DT_UINT8;
-
-      case Uint16Array:
-        return draco.DT_UINT16;
-
-      case Uint32Array:
-        return draco.DT_UINT32;
-    }
-  }
-}
-
-// Unlike TrackballControls, it maintains the "up" direction object.up (+Y by default).
-//
-//    Orbit - left mouse / touch: one-finger move
-//    Zoom - middle mouse, or mousewheel / touch: two-finger spread or squish
-//    Pan - right mouse, or left mouse + ctrl/meta/shiftKey, or arrow keys / touch: two-finger move
-
-const _changeEvent = {
-  type: 'change'
-};
-const _startEvent = {
-  type: 'start'
-};
-const _endEvent = {
-  type: 'end'
+  window.addEventListener("click", onMouseMove, false);
 };
 
-class OrbitControls extends EventDispatcher {
-  constructor(object, domElement) {
-    super();
-    if (domElement === undefined) console.warn('THREE.OrbitControls: The second parameter "domElement" is now mandatory.');
-    if (domElement === document) console.error('THREE.OrbitControls: "document" should not be used as the target "domElement". Please use "renderer.domElement" instead.');
-    this.object = object;
-    this.domElement = domElement; // Set to false to disable this control
-
-    this.enabled = true; // "target" sets the location of focus, where the object orbits around
-
-    this.target = new Vector3(); // How far you can dolly in and out ( PerspectiveCamera only )
-
-    this.minDistance = 0;
-    this.maxDistance = Infinity; // How far you can zoom in and out ( OrthographicCamera only )
-
-    this.minZoom = 0;
-    this.maxZoom = Infinity; // How far you can orbit vertically, upper and lower limits.
-    // Range is 0 to Math.PI radians.
-
-    this.minPolarAngle = 0; // radians
-
-    this.maxPolarAngle = Math.PI; // radians
-    // How far you can orbit horizontally, upper and lower limits.
-    // If set, the interval [ min, max ] must be a sub-interval of [ - 2 PI, 2 PI ], with ( max - min < 2 PI )
-
-    this.minAzimuthAngle = -Infinity; // radians
-
-    this.maxAzimuthAngle = Infinity; // radians
-    // Set to true to enable damping (inertia)
-    // If damping is enabled, you must call controls.update() in your animation loop
-
-    this.enableDamping = false;
-    this.dampingFactor = 0.05; // This option actually enables dollying in and out; left as "zoom" for backwards compatibility.
-    // Set to false to disable zooming
-
-    this.enableZoom = true;
-    this.zoomSpeed = 1.0; // Set to false to disable rotating
-
-    this.enableRotate = true;
-    this.rotateSpeed = 1.0; // Set to false to disable panning
-
-    this.enablePan = true;
-    this.panSpeed = 1.0;
-    this.screenSpacePanning = true; // if false, pan orthogonal to world-space direction camera.up
-
-    this.keyPanSpeed = 7.0; // pixels moved per arrow key push
-    // Set to true to automatically rotate around the target
-    // If auto-rotate is enabled, you must call controls.update() in your animation loop
-
-    this.autoRotate = false;
-    this.autoRotateSpeed = 2.0; // 30 seconds per orbit when fps is 60
-    // The four arrow keys
-
-    this.keys = {
-      LEFT: 'ArrowLeft',
-      UP: 'ArrowUp',
-      RIGHT: 'ArrowRight',
-      BOTTOM: 'ArrowDown'
-    }; // Mouse buttons
-
-    this.mouseButtons = {
-      LEFT: MOUSE.ROTATE,
-      MIDDLE: MOUSE.DOLLY,
-      RIGHT: MOUSE.PAN
-    }; // Touch fingers
-
-    this.touches = {
-      ONE: TOUCH.ROTATE,
-      TWO: TOUCH.DOLLY_PAN
-    }; // for reset
-
-    this.target0 = this.target.clone();
-    this.position0 = this.object.position.clone();
-    this.zoom0 = this.object.zoom; // the target DOM element for key events
-
-    this._domElementKeyEvents = null; //
-    // public methods
-    //
-
-    this.getPolarAngle = function () {
-      return spherical.phi;
-    };
-
-    this.getAzimuthalAngle = function () {
-      return spherical.theta;
-    };
-
-    this.listenToKeyEvents = function (domElement) {
-      domElement.addEventListener('keydown', onKeyDown);
-      this._domElementKeyEvents = domElement;
-    };
-
-    this.saveState = function () {
-      scope.target0.copy(scope.target);
-      scope.position0.copy(scope.object.position);
-      scope.zoom0 = scope.object.zoom;
-    };
-
-    this.reset = function () {
-      scope.target.copy(scope.target0);
-      scope.object.position.copy(scope.position0);
-      scope.object.zoom = scope.zoom0;
-      scope.object.updateProjectionMatrix();
-      scope.dispatchEvent(_changeEvent);
-      scope.update();
-      state = STATE.NONE;
-    }; // this method is exposed, but perhaps it would be better if we can make it private...
-
-
-    this.update = function () {
-      const offset = new Vector3(); // so camera.up is the orbit axis
-
-      const quat = new Quaternion().setFromUnitVectors(object.up, new Vector3(0, 1, 0));
-      const quatInverse = quat.clone().invert();
-      const lastPosition = new Vector3();
-      const lastQuaternion = new Quaternion();
-      const twoPI = 2 * Math.PI;
-      return function update() {
-        const position = scope.object.position;
-        offset.copy(position).sub(scope.target); // rotate offset to "y-axis-is-up" space
-
-        offset.applyQuaternion(quat); // angle from z-axis around y-axis
-
-        spherical.setFromVector3(offset);
-
-        if (scope.autoRotate && state === STATE.NONE) {
-          rotateLeft(getAutoRotationAngle());
-        }
-
-        if (scope.enableDamping) {
-          spherical.theta += sphericalDelta.theta * scope.dampingFactor;
-          spherical.phi += sphericalDelta.phi * scope.dampingFactor;
-        } else {
-          spherical.theta += sphericalDelta.theta;
-          spherical.phi += sphericalDelta.phi;
-        } // restrict theta to be between desired limits
-
-
-        let min = scope.minAzimuthAngle;
-        let max = scope.maxAzimuthAngle;
-
-        if (isFinite(min) && isFinite(max)) {
-          if (min < -Math.PI) min += twoPI;else if (min > Math.PI) min -= twoPI;
-          if (max < -Math.PI) max += twoPI;else if (max > Math.PI) max -= twoPI;
-
-          if (min <= max) {
-            spherical.theta = Math.max(min, Math.min(max, spherical.theta));
-          } else {
-            spherical.theta = spherical.theta > (min + max) / 2 ? Math.max(min, spherical.theta) : Math.min(max, spherical.theta);
-          }
-        } // restrict phi to be between desired limits
-
-
-        spherical.phi = Math.max(scope.minPolarAngle, Math.min(scope.maxPolarAngle, spherical.phi));
-        spherical.makeSafe();
-        spherical.radius *= scale; // restrict radius to be between desired limits
-
-        spherical.radius = Math.max(scope.minDistance, Math.min(scope.maxDistance, spherical.radius)); // move target to panned location
-
-        if (scope.enableDamping === true) {
-          scope.target.addScaledVector(panOffset, scope.dampingFactor);
-        } else {
-          scope.target.add(panOffset);
-        }
-
-        offset.setFromSpherical(spherical); // rotate offset back to "camera-up-vector-is-up" space
-
-        offset.applyQuaternion(quatInverse);
-        position.copy(scope.target).add(offset);
-        scope.object.lookAt(scope.target);
-
-        if (scope.enableDamping === true) {
-          sphericalDelta.theta *= 1 - scope.dampingFactor;
-          sphericalDelta.phi *= 1 - scope.dampingFactor;
-          panOffset.multiplyScalar(1 - scope.dampingFactor);
-        } else {
-          sphericalDelta.set(0, 0, 0);
-          panOffset.set(0, 0, 0);
-        }
-
-        scale = 1; // update condition is:
-        // min(camera displacement, camera rotation in radians)^2 > EPS
-        // using small-angle approximation cos(x/2) = 1 - x^2 / 8
-
-        if (zoomChanged || lastPosition.distanceToSquared(scope.object.position) > EPS || 8 * (1 - lastQuaternion.dot(scope.object.quaternion)) > EPS) {
-          scope.dispatchEvent(_changeEvent);
-          lastPosition.copy(scope.object.position);
-          lastQuaternion.copy(scope.object.quaternion);
-          zoomChanged = false;
-          return true;
-        }
-
-        return false;
-      };
-    }();
-
-    this.dispose = function () {
-      scope.domElement.removeEventListener('contextmenu', onContextMenu);
-      scope.domElement.removeEventListener('pointerdown', onPointerDown);
-      scope.domElement.removeEventListener('wheel', onMouseWheel);
-      scope.domElement.removeEventListener('touchstart', onTouchStart);
-      scope.domElement.removeEventListener('touchend', onTouchEnd);
-      scope.domElement.removeEventListener('touchmove', onTouchMove);
-      scope.domElement.ownerDocument.removeEventListener('pointermove', onPointerMove);
-      scope.domElement.ownerDocument.removeEventListener('pointerup', onPointerUp);
-
-      if (scope._domElementKeyEvents !== null) {
-        scope._domElementKeyEvents.removeEventListener('keydown', onKeyDown);
-      } //scope.dispatchEvent( { type: 'dispose' } ); // should this be added here?
-
-    }; //
-    // internals
-    //
-
-
-    const scope = this;
-    const STATE = {
-      NONE: -1,
-      ROTATE: 0,
-      DOLLY: 1,
-      PAN: 2,
-      TOUCH_ROTATE: 3,
-      TOUCH_PAN: 4,
-      TOUCH_DOLLY_PAN: 5,
-      TOUCH_DOLLY_ROTATE: 6
-    };
-    let state = STATE.NONE;
-    const EPS = 0.000001; // current position in spherical coordinates
-
-    const spherical = new Spherical();
-    const sphericalDelta = new Spherical();
-    let scale = 1;
-    const panOffset = new Vector3();
-    let zoomChanged = false;
-    const rotateStart = new Vector2();
-    const rotateEnd = new Vector2();
-    const rotateDelta = new Vector2();
-    const panStart = new Vector2();
-    const panEnd = new Vector2();
-    const panDelta = new Vector2();
-    const dollyStart = new Vector2();
-    const dollyEnd = new Vector2();
-    const dollyDelta = new Vector2();
-
-    function getAutoRotationAngle() {
-      return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
-    }
-
-    function getZoomScale() {
-      return Math.pow(0.95, scope.zoomSpeed);
-    }
-
-    function rotateLeft(angle) {
-      sphericalDelta.theta -= angle;
-    }
-
-    function rotateUp(angle) {
-      sphericalDelta.phi -= angle;
-    }
-
-    const panLeft = function () {
-      const v = new Vector3();
-      return function panLeft(distance, objectMatrix) {
-        v.setFromMatrixColumn(objectMatrix, 0); // get X column of objectMatrix
-
-        v.multiplyScalar(-distance);
-        panOffset.add(v);
-      };
-    }();
-
-    const panUp = function () {
-      const v = new Vector3();
-      return function panUp(distance, objectMatrix) {
-        if (scope.screenSpacePanning === true) {
-          v.setFromMatrixColumn(objectMatrix, 1);
-        } else {
-          v.setFromMatrixColumn(objectMatrix, 0);
-          v.crossVectors(scope.object.up, v);
-        }
-
-        v.multiplyScalar(distance);
-        panOffset.add(v);
-      };
-    }(); // deltaX and deltaY are in pixels; right and down are positive
-
-
-    const pan = function () {
-      const offset = new Vector3();
-      return function pan(deltaX, deltaY) {
-        const element = scope.domElement;
-
-        if (scope.object.isPerspectiveCamera) {
-          // perspective
-          const position = scope.object.position;
-          offset.copy(position).sub(scope.target);
-          let targetDistance = offset.length(); // half of the fov is center to top of screen
-
-          targetDistance *= Math.tan(scope.object.fov / 2 * Math.PI / 180.0); // we use only clientHeight here so aspect ratio does not distort speed
-
-          panLeft(2 * deltaX * targetDistance / element.clientHeight, scope.object.matrix);
-          panUp(2 * deltaY * targetDistance / element.clientHeight, scope.object.matrix);
-        } else if (scope.object.isOrthographicCamera) {
-          // orthographic
-          panLeft(deltaX * (scope.object.right - scope.object.left) / scope.object.zoom / element.clientWidth, scope.object.matrix);
-          panUp(deltaY * (scope.object.top - scope.object.bottom) / scope.object.zoom / element.clientHeight, scope.object.matrix);
-        } else {
-          // camera neither orthographic nor perspective
-          console.warn('WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.');
-          scope.enablePan = false;
-        }
-      };
-    }();
-
-    function dollyOut(dollyScale) {
-      if (scope.object.isPerspectiveCamera) {
-        scale /= dollyScale;
-      } else if (scope.object.isOrthographicCamera) {
-        scope.object.zoom = Math.max(scope.minZoom, Math.min(scope.maxZoom, scope.object.zoom * dollyScale));
-        scope.object.updateProjectionMatrix();
-        zoomChanged = true;
-      } else {
-        console.warn('WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.');
-        scope.enableZoom = false;
-      }
-    }
-
-    function dollyIn(dollyScale) {
-      if (scope.object.isPerspectiveCamera) {
-        scale *= dollyScale;
-      } else if (scope.object.isOrthographicCamera) {
-        scope.object.zoom = Math.max(scope.minZoom, Math.min(scope.maxZoom, scope.object.zoom / dollyScale));
-        scope.object.updateProjectionMatrix();
-        zoomChanged = true;
-      } else {
-        console.warn('WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.');
-        scope.enableZoom = false;
-      }
-    } //
-    // event callbacks - update the object state
-    //
-
-
-    function handleMouseDownRotate(event) {
-      rotateStart.set(event.clientX, event.clientY);
-    }
-
-    function handleMouseDownDolly(event) {
-      dollyStart.set(event.clientX, event.clientY);
-    }
-
-    function handleMouseDownPan(event) {
-      panStart.set(event.clientX, event.clientY);
-    }
-
-    function handleMouseMoveRotate(event) {
-      rotateEnd.set(event.clientX, event.clientY);
-      rotateDelta.subVectors(rotateEnd, rotateStart).multiplyScalar(scope.rotateSpeed);
-      const element = scope.domElement;
-      rotateLeft(2 * Math.PI * rotateDelta.x / element.clientHeight); // yes, height
-
-      rotateUp(2 * Math.PI * rotateDelta.y / element.clientHeight);
-      rotateStart.copy(rotateEnd);
-      scope.update();
-    }
-
-    function handleMouseMoveDolly(event) {
-      dollyEnd.set(event.clientX, event.clientY);
-      dollyDelta.subVectors(dollyEnd, dollyStart);
-
-      if (dollyDelta.y > 0) {
-        dollyOut(getZoomScale());
-      } else if (dollyDelta.y < 0) {
-        dollyIn(getZoomScale());
-      }
-
-      dollyStart.copy(dollyEnd);
-      scope.update();
-    }
-
-    function handleMouseMovePan(event) {
-      panEnd.set(event.clientX, event.clientY);
-      panDelta.subVectors(panEnd, panStart).multiplyScalar(scope.panSpeed);
-      pan(panDelta.x, panDelta.y);
-      panStart.copy(panEnd);
-      scope.update();
-    }
-
-    function handleMouseWheel(event) {
-      if (event.deltaY < 0) {
-        dollyIn(getZoomScale());
-      } else if (event.deltaY > 0) {
-        dollyOut(getZoomScale());
-      }
-
-      scope.update();
-    }
-
-    function handleKeyDown(event) {
-      let needsUpdate = false;
-
-      switch (event.code) {
-        case scope.keys.UP:
-          pan(0, scope.keyPanSpeed);
-          needsUpdate = true;
-          break;
-
-        case scope.keys.BOTTOM:
-          pan(0, -scope.keyPanSpeed);
-          needsUpdate = true;
-          break;
-
-        case scope.keys.LEFT:
-          pan(scope.keyPanSpeed, 0);
-          needsUpdate = true;
-          break;
-
-        case scope.keys.RIGHT:
-          pan(-scope.keyPanSpeed, 0);
-          needsUpdate = true;
-          break;
-      }
-
-      if (needsUpdate) {
-        // prevent the browser from scrolling on cursor keys
-        event.preventDefault();
-        scope.update();
-      }
-    }
-
-    function handleTouchStartRotate(event) {
-      if (event.touches.length == 1) {
-        rotateStart.set(event.touches[0].pageX, event.touches[0].pageY);
-      } else {
-        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
-        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
-        rotateStart.set(x, y);
-      }
-    }
-
-    function handleTouchStartPan(event) {
-      if (event.touches.length == 1) {
-        panStart.set(event.touches[0].pageX, event.touches[0].pageY);
-      } else {
-        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
-        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
-        panStart.set(x, y);
-      }
-    }
-
-    function handleTouchStartDolly(event) {
-      const dx = event.touches[0].pageX - event.touches[1].pageX;
-      const dy = event.touches[0].pageY - event.touches[1].pageY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      dollyStart.set(0, distance);
-    }
-
-    function handleTouchStartDollyPan(event) {
-      if (scope.enableZoom) handleTouchStartDolly(event);
-      if (scope.enablePan) handleTouchStartPan(event);
-    }
-
-    function handleTouchStartDollyRotate(event) {
-      if (scope.enableZoom) handleTouchStartDolly(event);
-      if (scope.enableRotate) handleTouchStartRotate(event);
-    }
-
-    function handleTouchMoveRotate(event) {
-      if (event.touches.length == 1) {
-        rotateEnd.set(event.touches[0].pageX, event.touches[0].pageY);
-      } else {
-        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
-        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
-        rotateEnd.set(x, y);
-      }
-
-      rotateDelta.subVectors(rotateEnd, rotateStart).multiplyScalar(scope.rotateSpeed);
-      const element = scope.domElement;
-      rotateLeft(2 * Math.PI * rotateDelta.x / element.clientHeight); // yes, height
-
-      rotateUp(2 * Math.PI * rotateDelta.y / element.clientHeight);
-      rotateStart.copy(rotateEnd);
-    }
-
-    function handleTouchMovePan(event) {
-      if (event.touches.length == 1) {
-        panEnd.set(event.touches[0].pageX, event.touches[0].pageY);
-      } else {
-        const x = 0.5 * (event.touches[0].pageX + event.touches[1].pageX);
-        const y = 0.5 * (event.touches[0].pageY + event.touches[1].pageY);
-        panEnd.set(x, y);
-      }
-
-      panDelta.subVectors(panEnd, panStart).multiplyScalar(scope.panSpeed);
-      pan(panDelta.x, panDelta.y);
-      panStart.copy(panEnd);
-    }
-
-    function handleTouchMoveDolly(event) {
-      const dx = event.touches[0].pageX - event.touches[1].pageX;
-      const dy = event.touches[0].pageY - event.touches[1].pageY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      dollyEnd.set(0, distance);
-      dollyDelta.set(0, Math.pow(dollyEnd.y / dollyStart.y, scope.zoomSpeed));
-      dollyOut(dollyDelta.y);
-      dollyStart.copy(dollyEnd);
-    }
-
-    function handleTouchMoveDollyPan(event) {
-      if (scope.enableZoom) handleTouchMoveDolly(event);
-      if (scope.enablePan) handleTouchMovePan(event);
-    }
-
-    function handleTouchMoveDollyRotate(event) {
-      if (scope.enableZoom) handleTouchMoveDolly(event);
-      if (scope.enableRotate) handleTouchMoveRotate(event);
-    }
-    // event handlers - FSM: listen for events and reset state
-    //
-
-
-    function onPointerDown(event) {
-      if (scope.enabled === false) return;
-
-      switch (event.pointerType) {
-        case 'mouse':
-        case 'pen':
-          onMouseDown(event);
-          break;
-        // TODO touch
-      }
-    }
-
-    function onPointerMove(event) {
-      if (scope.enabled === false) return;
-
-      switch (event.pointerType) {
-        case 'mouse':
-        case 'pen':
-          onMouseMove(event);
-          break;
-        // TODO touch
-      }
-    }
-
-    function onPointerUp(event) {
-      switch (event.pointerType) {
-        case 'mouse':
-        case 'pen':
-          onMouseUp();
-          break;
-        // TODO touch
-      }
-    }
-
-    function onMouseDown(event) {
-      // Prevent the browser from scrolling.
-      event.preventDefault(); // Manually set the focus since calling preventDefault above
-      // prevents the browser from setting it automatically.
-
-      scope.domElement.focus ? scope.domElement.focus() : window.focus();
-      let mouseAction;
-
-      switch (event.button) {
-        case 0:
-          mouseAction = scope.mouseButtons.LEFT;
-          break;
-
-        case 1:
-          mouseAction = scope.mouseButtons.MIDDLE;
-          break;
-
-        case 2:
-          mouseAction = scope.mouseButtons.RIGHT;
-          break;
-
-        default:
-          mouseAction = -1;
-      }
-
-      switch (mouseAction) {
-        case MOUSE.DOLLY:
-          if (scope.enableZoom === false) return;
-          handleMouseDownDolly(event);
-          state = STATE.DOLLY;
-          break;
-
-        case MOUSE.ROTATE:
-          if (event.ctrlKey || event.metaKey || event.shiftKey) {
-            if (scope.enablePan === false) return;
-            handleMouseDownPan(event);
-            state = STATE.PAN;
-          } else {
-            if (scope.enableRotate === false) return;
-            handleMouseDownRotate(event);
-            state = STATE.ROTATE;
-          }
-
-          break;
-
-        case MOUSE.PAN:
-          if (event.ctrlKey || event.metaKey || event.shiftKey) {
-            if (scope.enableRotate === false) return;
-            handleMouseDownRotate(event);
-            state = STATE.ROTATE;
-          } else {
-            if (scope.enablePan === false) return;
-            handleMouseDownPan(event);
-            state = STATE.PAN;
-          }
-
-          break;
-
-        default:
-          state = STATE.NONE;
-      }
-
-      if (state !== STATE.NONE) {
-        scope.domElement.ownerDocument.addEventListener('pointermove', onPointerMove);
-        scope.domElement.ownerDocument.addEventListener('pointerup', onPointerUp);
-        scope.dispatchEvent(_startEvent);
-      }
-    }
-
-    function onMouseMove(event) {
-      if (scope.enabled === false) return;
-      event.preventDefault();
-
-      switch (state) {
-        case STATE.ROTATE:
-          if (scope.enableRotate === false) return;
-          handleMouseMoveRotate(event);
-          break;
-
-        case STATE.DOLLY:
-          if (scope.enableZoom === false) return;
-          handleMouseMoveDolly(event);
-          break;
-
-        case STATE.PAN:
-          if (scope.enablePan === false) return;
-          handleMouseMovePan(event);
-          break;
-      }
-    }
-
-    function onMouseUp(event) {
-      scope.domElement.ownerDocument.removeEventListener('pointermove', onPointerMove);
-      scope.domElement.ownerDocument.removeEventListener('pointerup', onPointerUp);
-      if (scope.enabled === false) return;
-      scope.dispatchEvent(_endEvent);
-      state = STATE.NONE;
-    }
-
-    function onMouseWheel(event) {
-      if (scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE && state !== STATE.ROTATE) return;
-      event.preventDefault();
-      scope.dispatchEvent(_startEvent);
-      handleMouseWheel(event);
-      scope.dispatchEvent(_endEvent);
-    }
-
-    function onKeyDown(event) {
-      if (scope.enabled === false || scope.enablePan === false) return;
-      handleKeyDown(event);
-    }
-
-    function onTouchStart(event) {
-      if (scope.enabled === false) return;
-      event.preventDefault(); // prevent scrolling
-
-      switch (event.touches.length) {
-        case 1:
-          switch (scope.touches.ONE) {
-            case TOUCH.ROTATE:
-              if (scope.enableRotate === false) return;
-              handleTouchStartRotate(event);
-              state = STATE.TOUCH_ROTATE;
-              break;
-
-            case TOUCH.PAN:
-              if (scope.enablePan === false) return;
-              handleTouchStartPan(event);
-              state = STATE.TOUCH_PAN;
-              break;
-
-            default:
-              state = STATE.NONE;
-          }
-
-          break;
-
-        case 2:
-          switch (scope.touches.TWO) {
-            case TOUCH.DOLLY_PAN:
-              if (scope.enableZoom === false && scope.enablePan === false) return;
-              handleTouchStartDollyPan(event);
-              state = STATE.TOUCH_DOLLY_PAN;
-              break;
-
-            case TOUCH.DOLLY_ROTATE:
-              if (scope.enableZoom === false && scope.enableRotate === false) return;
-              handleTouchStartDollyRotate(event);
-              state = STATE.TOUCH_DOLLY_ROTATE;
-              break;
-
-            default:
-              state = STATE.NONE;
-          }
-
-          break;
-
-        default:
-          state = STATE.NONE;
-      }
-
-      if (state !== STATE.NONE) {
-        scope.dispatchEvent(_startEvent);
-      }
-    }
-
-    function onTouchMove(event) {
-      if (scope.enabled === false) return;
-      event.preventDefault(); // prevent scrolling
-
-      switch (state) {
-        case STATE.TOUCH_ROTATE:
-          if (scope.enableRotate === false) return;
-          handleTouchMoveRotate(event);
-          scope.update();
-          break;
-
-        case STATE.TOUCH_PAN:
-          if (scope.enablePan === false) return;
-          handleTouchMovePan(event);
-          scope.update();
-          break;
-
-        case STATE.TOUCH_DOLLY_PAN:
-          if (scope.enableZoom === false && scope.enablePan === false) return;
-          handleTouchMoveDollyPan(event);
-          scope.update();
-          break;
-
-        case STATE.TOUCH_DOLLY_ROTATE:
-          if (scope.enableZoom === false && scope.enableRotate === false) return;
-          handleTouchMoveDollyRotate(event);
-          scope.update();
-          break;
-
-        default:
-          state = STATE.NONE;
-      }
-    }
-
-    function onTouchEnd(event) {
-      if (scope.enabled === false) return;
-      scope.dispatchEvent(_endEvent);
-      state = STATE.NONE;
-    }
-
-    function onContextMenu(event) {
-      if (scope.enabled === false) return;
-      event.preventDefault();
-    } //
-
-
-    scope.domElement.addEventListener('contextmenu', onContextMenu);
-    scope.domElement.addEventListener('pointerdown', onPointerDown);
-    scope.domElement.addEventListener('wheel', onMouseWheel, {
-      passive: false
-    });
-    scope.domElement.addEventListener('touchstart', onTouchStart, {
-      passive: false
-    });
-    scope.domElement.addEventListener('touchend', onTouchEnd);
-    scope.domElement.addEventListener('touchmove', onTouchMove, {
-      passive: false
-    }); // force an update at start
-
-    this.update();
+var initializeCamera = function initializeCamera(camera, context) {
+  camera.id = camera.id || v4();
+  camera["class"] = camera["class"] || [];
+  camera.settings = camera.settings || {};
+  camera["class"] = camera["class"] || [];
+  camera.settings.type = camera.settings.type || "PerspectiveCamera";
+  camera.parameters = camera.parameters || {};
+
+  if (camera.settings.type === "PerspectiveCamera") {
+    var fov = 45;
+    var aspect = context.rootElement.offsetWidth / context.rootElement.offsetHeight;
+    var near = 1;
+    var far = 10000;
+    camera.parameters = [fov, aspect, near, far];
+  } else {
+    var left = context.rootElement.offsetWidth / -2;
+    var right = context.rootElement.offsetWidth / 2;
+    var top = context.rootElement.offsetHeight / 2;
+    var bottom = context.rootElement.offsetHeight / -2;
+    var _near = 1;
+    var _far = 1000;
+    camera.parameters = [left, right, top, bottom, _near, _far];
   }
 
-} // This set of controls performs orbiting, dollying (zooming), and panning.
+  camera.settings.position = camera.settings.position || {};
+  camera.settings.position.x = camera.settings.position.x || 0;
+  camera.settings.position.y = camera.settings.position.y || 0;
+  camera.settings.position.z = camera.settings.position.z || 10;
+  camera.settings.lookAt = _construct(Vector3, _toConsumableArray(camera.settings.lookAt || [0, 0, 0]));
+};
+var initializeRenderer = function initializeRenderer(renderer, context) {
+  renderer.id = renderer.id || v4();
+  renderer["class"] = renderer["class"] || [];
+  renderer.settings = renderer.settings || {};
+  renderer.settings.shadowMap = renderer.settings.shadowMap || {
+    enabled: true,
+    type: PCFSoftShadowMap
+  };
+  renderer.settings.setClearColor = renderer.settings.setClearColor || ["lightblue"], renderer.settings.type = renderer.settings.type || "WebGLRenderer";
+  renderer.parameters = renderer.parameters || [{
+    alpha: true,
+    antialias: true
+  }];
 
-var promise = Promise;
+  if (renderer.settings.type === "WebGLRenderer") {
+    renderer.settings.setPixelRatio = renderer.settings.setPixelRatio || [context.window.devicePixelRatio];
+  }
 
-var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
-  _inherits(Clip3D, _MC$BrowserClip);
+  renderer.settings.setSize = renderer.settings.setSize || [context.rootElement.offsetWidth, context.rootElement.offsetHeight];
+};
+var initializeLight = function initializeLight(light) {
+  light.id = light.id || v4();
+  light.selector = light.selector || "!.scenes";
+  light["class"] = light["class"] || [];
+  light.settings = light.settings || {};
+  light.settings.type = light.settings.type || "DirectionalLight";
+
+  if (light.settings.type === "SpotLight") {
+    light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
+    light.settings.position = light.settings.position || {
+      set: [0, 0, 50]
+    };
+    light.settings.shadow = {
+      camera: {
+        near: 0.5,
+        far: 300,
+        left: -50,
+        bottom: -50,
+        right: 50,
+        top: 50
+      },
+      bias: 0.0001,
+      mapSize: {
+        x: 1024 * 6,
+        y: 1024 * 6
+      }
+    };
+    light.settings.penumbra = light.settings.penumbra || 0.8;
+    light.parameters = light.parameters || [0xffffff, 2];
+  } else if (light.settings.type === "DirectionalLight") {
+    light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
+    light.settings.shadow = light.settings.shadow || {
+      camera: {
+        near: 0.5,
+        far: 100,
+        left: -50,
+        bottom: -50,
+        right: 50,
+        top: 50
+      },
+      bias: 0.0001,
+      mapSize: {
+        x: 1024 * 6,
+        y: 1024 * 6
+      }
+    };
+    light.settings.position = light.settings.position || {
+      set: [0, 0, 50]
+    };
+    light.parameters = light.parameters || [0xffffff, 1];
+  } else if (light.settings.type === "PointLight") {
+    light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
+    light.parameters = light.parameters || [0xffffff, 1, 100];
+    light.settings.position = light.settings.position || {
+      set: [0, 0, 50]
+    };
+    light.settings.shadow = {
+      camera: {
+        near: 0.5,
+        far: 300,
+        left: -50,
+        bottom: -50,
+        right: 50,
+        top: 50
+      },
+      bias: 0.0001,
+      mapSize: {
+        x: 512,
+        y: 512
+      }
+    };
+  } else if (light.settings.type === "AmbientLight") {
+    light.parameters = light.parameters || [0x404040];
+  } else if (light.settings.type === "HemisphereLight") {
+    light.parameters = light.parameters || [0xffffff, 0xffffff, 0.6];
+    light.settings.position = light.settings.position || {
+      set: [0, 0, 50]
+    };
+  }
+};
+var initializeMesh = function initializeMesh(entity) {
+  entity.id = entity.id || v4();
+  entity["class"] = entity["class"] || [];
+  entity.selector = entity.selector || "!.scenes";
+  entity.settings = entity.settings || {};
+  entity.settings.castShadow = entity.settings.castShadow || false;
+  entity.settings.receiveShadow = entity.settings.receiveShadow || false;
+  entity.settings.position = entity.settings.position || {};
+  entity.settings.position.x = entity.settings.position.x || 0;
+  entity.settings.position.y = entity.settings.position.y || 0;
+  entity.settings.position.z = entity.settings.position.z || 0;
+};
+
+var Clip3D = /*#__PURE__*/function (_BrowserClip) {
+  _inherits(Clip3D, _BrowserClip);
 
   var _super = _createSuper(Clip3D);
 
@@ -14375,26 +14571,18 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
   _createClass(Clip3D, [{
     key: "onAfterRender",
     value: function onAfterRender() {
-      this.attributes = _objectSpread2(_objectSpread2({}, JSON.parse(JSON.stringify(this.attrs))), {}, {
-        entities: this.attrs.entities,
-        controls: this.attrs.controls
+      /* 
+        attributes needs to be cloned for the scene to work as CASI
+        entities and controls should not be cloned to avoid
+        double creations 
+      */
+      var attrs = JSON.parse(JSON.stringify(this.attrs));
+      this.attributes = _objectSpread2(_objectSpread2({}, attrs), {}, {
+        entities: attrs.entities || [],
+        controls: attrs.controls,
+        models: [],
+        renders: attrs.renders || [{}]
       });
-      this.append = false;
-      this.loaders = {
-        FBXLoader: function FBXLoader$1(url, _f) {
-          var loader = new FBXLoader();
-          loader.load(url, _f);
-        },
-        GLTFLoader: function GLTFLoader$1(url, _f) {
-          var loader = new GLTFLoader();
-          var dracoLoader = new DRACOLoader();
-          loader.setDRACOLoader(dracoLoader);
-          loader.load(url, function (gltf) {
-            gltf.scene.animations = gltf.animations;
-            return _f(gltf.scene);
-          });
-        }
-      };
       this.context.loading = false;
       this.context.loadedModels = [];
       this.context.loadingModels = [];
@@ -14402,56 +14590,84 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
       this.init();
     }
   }, {
-    key: "getElements",
-    value: function getElements(selector) {
-      return selector.includes("#") ? this.context.getElements("!".concat(selector))[0] : this.context.getElements("!".concat(selector));
+    key: "getElementById",
+    value: function getElementById(id) {
+      return this.context.getElements("!#".concat(id))[0];
     }
   }, {
-    key: "loadTheModel",
+    key: "getEntityById",
+    value: function getEntityById(id) {
+      return (this.context.getElements("!#".concat(id))[0] || {}).entity;
+    }
+  }, {
+    key: "getObjectById",
+    value: function getObjectById(id) {
+      var _entity;
+
+      return (_entity = (this.context.getElements("!#".concat(id))[0] || {}).entity) === null || _entity === void 0 ? void 0 : _entity.object;
+    }
+  }, {
+    key: "getObjects",
+    value: function getObjects(selector) {
+      return this.context.getElements(selector).map(function (element) {
+        return element.entity.object;
+      });
+    }
+  }, {
+    key: "getObject",
+    value: function getObject(selector) {
+      return this.context.getElements(selector).map(function (element) {
+        return element.entity.object;
+      })[0];
+    }
+  }, {
+    key: "loadModel",
     value: function () {
-      var _loadTheModel = _asyncToGenerator( /*#__PURE__*/regeneratorRuntime.mark(function _callee(entity) {
-        var _theModel$entity,
+      var _loadModel = _asyncToGenerator( /*#__PURE__*/regeneratorRuntime.mark(function _callee(entity) {
+        var _entity$model,
+            _entity$model$id,
+            _entity$model2,
+            _entity$model2$class,
             _this = this;
 
-        var theModel, loader, loadModel;
+        var model, loader;
         return regeneratorRuntime.wrap(function _callee$(_context) {
           while (1) {
             switch (_context.prev = _context.next) {
               case 0:
-                //check if model is previously loaded
-                theModel = this.getElements("#".concat(entity.model.id));
+                /* 
+                check if model is previously loaded
+                and clone it to prevent loading twice
+                */
+                model = this.getEntityById("models-".concat(entity.model.id)) || {};
 
-                if (!Object.keys((theModel === null || theModel === void 0 ? void 0 : (_theModel$entity = theModel.entity) === null || _theModel$entity === void 0 ? void 0 : _theModel$entity.object) || {}).length) {
+                if (!Object.keys(model).length) {
                   _context.next = 7;
                   break;
                 }
 
-                if (!(theModel.entity.loader === "GLTFLoader")) {
+                if (!(model.loader === "GLTFLoader")) {
                   _context.next = 6;
                   break;
                 }
 
-                return _context.abrupt("return", SkeletonUtils.clone(theModel.entity.object.scene));
+                return _context.abrupt("return", SkeletonUtils.clone(model.object.scene));
 
               case 6:
-                return _context.abrupt("return", theModel.entity.object.clone());
+                return _context.abrupt("return", model.object.clone());
 
               case 7:
-                entity.model.id = entity.model.id || v4();
-                entity.model["class"] = entity.model["class"] || [];
-                loader = this.loaders[entity.model.loader];
-
-                loadModel = function loadModel() {
-                  return new promise(function (resolve) {
-                    loader(entity.model.file, function (obj) {
-                      return resolve(obj);
-                    });
-                  });
-                };
-
+                (_entity$model$id = (_entity$model = entity.model).id) !== null && _entity$model$id !== void 0 ? _entity$model$id : _entity$model.id = v4();
+                (_entity$model2$class = (_entity$model2 = entity.model)["class"]) !== null && _entity$model2$class !== void 0 ? _entity$model2$class : _entity$model2["class"] = [];
                 this.context.loadingModels.push(1);
-                return _context.abrupt("return", loadModel(entity).then(function (obj) {
-                  _this.setCustomEntity("models-" + entity.model.id, {
+                loader = loaders[entity.model.loader];
+                return _context.abrupt("return", new Promise(function (resolve) {
+                  return loader(entity.model.file, function (obj) {
+                    return resolve(obj);
+                  });
+                }).then(function (obj) {
+                  /* store the model for future use */
+                  _this.setCustomEntity("models-".concat(entity.model.id), {
                     object: obj
                   }, ["models"]);
 
@@ -14460,7 +14676,7 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
                   return console.error(e);
                 }));
 
-              case 13:
+              case 12:
               case "end":
                 return _context.stop();
             }
@@ -14468,20 +14684,106 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
         }, _callee, this);
       }));
 
-      function loadTheModel(_x) {
-        return _loadTheModel.apply(this, arguments);
+      function loadModel(_x) {
+        return _loadModel.apply(this, arguments);
       }
 
-      return loadTheModel;
+      return loadModel;
     }()
+  }, {
+    key: "checkLoadingContext",
+    value: function checkLoadingContext() {
+      if (!this.context.loading) {
+        this.context.loading = true;
+        this.contextLoading();
+      }
+    }
+  }, {
+    key: "checkLoadedContext",
+    value: function checkLoadedContext() {
+      if (this.context.loadedModels.length === this.context.loadingModels.length) {
+        this.context.loading = false;
+        this.contextLoaded();
+      }
+    }
+  }, {
+    key: "createModel",
+    value: function createModel(entity) {
+      var _this2 = this;
+
+      // check if context previously loading
+      this.checkLoadingContext(); //create the custom entity reference
+
+      this.setCustomEntity(entity.id, {
+        model: entity.model,
+        settings: entity.settings,
+        object: {}
+      }, ["entities"].concat(_toConsumableArray(entity["class"]))); // run the loadModel function
+      // and push in loadingModels Array one
+
+      this.loadModel(entity).then(function (model) {
+        //apply settings
+        applySettingsToObjects(entity.settings, model);
+
+        var theEntity = _this2.getEntityById(entity.id);
+
+        theEntity.object = model;
+
+        _this2.getObjects(entity.selector).forEach(function (scene) {
+          return scene.add(model);
+        });
+
+        _this2.context.loadedModels.push(1);
+
+        _this2.checkLoadedContext();
+      });
+    }
+  }, {
+    key: "createMesh",
+    value: function createMesh(entity) {
+      var geometry = _construct(THREE[entity.geometry.type], _toConsumableArray(entity.geometry.parameters));
+
+      if (entity.material.parameters[0].side && typeof entity.material.parameters[0].side == "string") {
+        var side = entity.material.parameters[0].side;
+        entity.material.parameters[0].side = THREE[side];
+      }
+
+      if (entity.material.parameters[0].textureMap && !entity.material.parameters[0].map) {
+        entity.material.parameters[0].map = new TextureLoader().load(entity.material.parameters[0].textureMap);
+      }
+
+      if (entity.material.parameters[0].videoMap) {
+        var video = document.createElement("video");
+        video.src = entity.material.parameters[0].videoMap;
+        this.context.rootElement.appendChild(video);
+        video.play();
+        entity.material.parameters[0].map = new VideoTexture(video);
+      }
+
+      var material = _construct(THREE[entity.material.type], _toConsumableArray(entity.material.parameters));
+
+      var entityObj = new THREE[entity.settings.entityType || "Mesh"](geometry, material);
+      applySettingsToObjects(entity.settings, entityObj);
+      this.setCustomEntity(entity.id, {
+        settings: entity.settings,
+        object: entityObj
+      }, ["entities"].concat(_toConsumableArray(entity["class"])));
+
+      if (entity.callback) {
+        entity.callback(entityObj.geometry, entityObj.material, entityObj);
+      }
+
+      this.getObjects(entity.selector).forEach(function (scene) {
+        return scene.add(entityObj);
+      });
+    }
   }, {
     key: "init",
     value: function () {
       var _init = _asyncToGenerator( /*#__PURE__*/regeneratorRuntime.mark(function _callee2() {
-        var _this2 = this;
+        var _this3 = this;
 
-        var _iterator2, _step2, _loop, _ret, _iterator3, _step3, _render, applyElement, cameraElement, controls, render, raycaster, mouse, onMouseMove, animate;
-
+        var cameraObject, controls, animate;
         return regeneratorRuntime.wrap(function _callee2$(_context2) {
           while (1) {
             switch (_context2.prev = _context2.next) {
@@ -14489,291 +14791,111 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
                 /*
                  * SCENES
                  */
-                !(this.attributes.scenes instanceof Array) && (this.attributes.scenes = [this.attributes.scenes]);
-                this.attributes.scenes.map(function (scene) {
-                  scene.id = scene.id || v4();
-                  scene["class"] = scene["class"] || [];
-                  scene.settings = scene.settings || {};
+                if (!(this.attributes.scenes instanceof Array)) this.attributes.scenes = [this.attributes.scenes];
+                this.attributes.scenes.forEach(function (scene) {
+                  var _scene$id, _scene$class, _scene$settings;
 
-                  _this2.setCustomEntity(scene.id, {
+                  (_scene$id = scene.id) !== null && _scene$id !== void 0 ? _scene$id : scene.id = v4();
+                  (_scene$class = scene["class"]) !== null && _scene$class !== void 0 ? _scene$class : scene["class"] = [];
+                  (_scene$settings = scene.settings) !== null && _scene$settings !== void 0 ? _scene$settings : scene.settings = {};
+
+                  _this3.setCustomEntity(scene.id, {
                     settings: scene.settings,
                     object: new Scene()
                   }, ["scenes"].concat(_toConsumableArray(scene["class"])));
 
-                  var sceneObj = _this2.getElements("#".concat(scene.id));
+                  var sceneObj = _this3.getObjectById(scene.id);
 
                   if (scene.fog) {
-                    sceneObj.entity.object.fog = _construct(Fog, _toConsumableArray(scene.fog));
+                    sceneObj.fog = _construct(Fog, _toConsumableArray(scene.fog));
                   }
                 });
                 /*
                  * CAMERAS
                  */
 
-                !(this.attributes.cameras instanceof Array) && (this.attributes.cameras = [this.attributes.cameras]);
-                this.attributes.cameras.map(function (camera) {
-                  _this2.initializeCamera(camera);
+                if (!(this.attributes.cameras instanceof Array)) this.attributes.cameras = [this.attributes.cameras];
+                this.attributes.cameras.forEach(function (camera) {
+                  initializeCamera(camera, _this3.context);
 
-                  _this2.setCustomEntity(camera.id || "camera", {
+                  _this3.setCustomEntity(camera.id, {
                     settings: camera.settings,
                     object: _construct(THREE[camera.settings.type], _toConsumableArray(camera.parameters))
                   }, ["cameras"].concat(_toConsumableArray(camera["class"])));
 
-                  var cameraObj = _this2.getElements("#".concat(camera.id)).entity.object;
+                  var cameraObj = _this3.getObjectById(camera.id);
 
-                  _this2.applySettingsToObjects(camera.settings, cameraObj);
-
+                  applySettingsToObjects(camera.settings, cameraObj);
                   cameraObj.updateProjectionMatrix();
                 });
                 /*
                  * RENDERERS
                  */
 
-                !(this.attributes.renderers instanceof Array) && (this.attributes.renderers = [this.attributes.renderers]);
-                this.attributes.renderers.map(function (renderer) {
-                  _this2.initializeRenderer(renderer);
+                if (!(this.attributes.renderers instanceof Array)) this.attributes.renderers = [this.attributes.renderers];
+                this.attributes.renderers.forEach(function (renderer) {
+                  initializeRenderer(renderer, _this3.context);
 
-                  _this2.setCustomEntity(renderer.id, {
+                  _this3.setCustomEntity(renderer.id, {
                     settings: renderer.settings,
                     object: _construct(THREE[renderer.settings.type], _toConsumableArray(renderer.parameters))
                   }, ["renderers"].concat(_toConsumableArray(renderer["class"])));
 
-                  var rendererObj = _this2.getElements("#".concat(renderer.id)).entity.object;
+                  var rendererObj = _this3.getObjectById(renderer.id);
 
                   rendererObj.outputEncoding = sRGBEncoding;
-
-                  _this2.applySettingsToObjects(renderer.settings, rendererObj);
+                  applySettingsToObjects(renderer.settings, rendererObj);
                 });
                 /*
                  * LIGHTS
                  */
 
-                !(this.attributes.lights instanceof Array) && (this.attributes.lights = [this.attributes.lights]);
-                this.attributes.lights.map(function (light) {
-                  _this2.initializeLight(light);
+                if (!(this.attributes.lights instanceof Array)) this.attributes.lights = [this.attributes.lights];
+                this.attributes.lights.forEach(function (light) {
+                  initializeLight(light);
 
-                  _this2.setCustomEntity(light.id, {
+                  _this3.setCustomEntity(light.id, {
                     settings: light.settings,
                     object: _construct(THREE[light.settings.type], _toConsumableArray(light.parameters))
                   }, ["lights"].concat(_toConsumableArray(light["class"])));
 
-                  var lightObj = _this2.getElements("#".concat(light.id)).entity.object;
+                  var lightObj = _this3.getObjectById(light.id);
 
-                  _this2.applySettingsToObjects(light.settings, lightObj);
+                  applySettingsToObjects(light.settings, lightObj);
 
-                  var _iterator = _createForOfIteratorHelper(_this2.getElements(light.selector)),
-                      _step;
-
-                  try {
-                    for (_iterator.s(); !(_step = _iterator.n()).done;) {
-                      var scene = _step.value;
-                      scene.entity.object.add(lightObj); // const helper = new THREE.DirectionalLightHelper(lightObj, 5);
-                      // scene.entity.object.add(helper);
-                    }
-                  } catch (err) {
-                    _iterator.e(err);
-                  } finally {
-                    _iterator.f();
-                  }
+                  _this3.getObjects(light.selector).forEach(function (scene) {
+                    return scene.add(lightObj);
+                  });
                 });
                 /*
-                 * entities
+                 ENTITIES
                  */
 
-                this.attributes.models = [];
-                _iterator2 = _createForOfIteratorHelper(this.attributes.entities);
-                _context2.prev = 10;
-
-                _loop = function _loop() {
-                  var entity = _step2.value;
-
-                  _this2.initializeMesh(entity);
-
-                  if (entity.model) {
-                    // check if context previously loading
-                    if (!_this2.context.loading) {
-                      _this2.context.loading = true;
-
-                      _this2.contextLoading();
-                    } //create the custume entity reference
-
-
-                    _this2.setCustomEntity(entity.id, {
-                      model: entity.model,
-                      settings: entity.settings,
-                      object: {}
-                    }, ["entities"].concat(_toConsumableArray(entity["class"]))); // run the loadTheModel function
-                    // and push in loadingModels Array one
-
-
-                    _this2.loadTheModel(entity).then(function (model) {
-                      //apply settings
-                      _this2.applySettingsToObjects(entity.settings, model);
-
-                      var theEntity = _this2.getElements("#".concat(entity.id));
-
-                      theEntity.entity.object = model; // add to the scene
-
-                      model.traverse(function (child) {
-                        if (child.isMesh) {
-                          child.castShadow = entity.settings.castShadow;
-                          child.receiveShadow = entity.settings.receiveShadow;
-                        }
-                      });
-
-                      var _iterator4 = _createForOfIteratorHelper(_this2.getElements(entity.selector)),
-                          _step4;
-
-                      try {
-                        for (_iterator4.s(); !(_step4 = _iterator4.n()).done;) {
-                          var scene = _step4.value;
-                          scene.entity.object.add(model);
-                        }
-                      } catch (err) {
-                        _iterator4.e(err);
-                      } finally {
-                        _iterator4.f();
-                      }
-
-                      _this2.context.loadedModels.push(1);
-
-                      if (_this2.context.loadedModels.length === _this2.context.loadingModels.length) {
-                        _this2.context.loading = false;
-
-                        _this2.contextLoaded();
-                      }
-                    });
-
-                    return "continue";
-                  }
-
-                  var geometry = _construct(THREE[entity.geometry.type], _toConsumableArray(entity.geometry.parameters));
-
-                  if (entity.material.parameters[0].side && typeof entity.material.parameters[0].side == "string") {
-                    var side = entity.material.parameters[0].side;
-                    entity.material.parameters[0].side = THREE[side];
-                  }
-
-                  if (entity.material.parameters[0].textureMap && !entity.material.parameters[0].map) {
-                    entity.material.parameters[0].map = new TextureLoader().load(entity.material.parameters[0].textureMap);
-                  }
-
-                  if (entity.material.parameters[0].videoMap) {
-                    var video = document.createElement("video");
-                    video.src = entity.material.parameters[0].videoMap;
-
-                    _this2.context.rootElement.appendChild(video);
-
-                    video.play();
-                    entity.material.parameters[0].map = new VideoTexture(video);
-                  }
-
-                  var material = _construct(THREE[entity.material.type], _toConsumableArray(entity.material.parameters));
-
-                  console.log(entity);
-
-                  _this2.setCustomEntity(entity.id, {
-                    settings: entity.settings,
-                    object: new THREE[entity.settings.entityType || "Mesh"](geometry, material)
-                  }, ["entities"].concat(_toConsumableArray(entity["class"])));
-
-                  var entityObj = _this2.getElements("#".concat(entity.id)).entity.object;
-
-                  _this2.applySettingsToObjects(entity.settings, entityObj);
-
-                  if (entity.callback) {
-                    entity.callback(entityObj.geometry, entityObj.material, entityObj);
-                  }
-
-                  var _iterator5 = _createForOfIteratorHelper(_this2.getElements(entity.selector)),
-                      _step5;
-
-                  try {
-                    for (_iterator5.s(); !(_step5 = _iterator5.n()).done;) {
-                      var scene = _step5.value;
-                      scene.entity.object.add(entityObj);
-                    }
-                  } catch (err) {
-                    _iterator5.e(err);
-                  } finally {
-                    _iterator5.f();
-                  }
-                };
-
-                _iterator2.s();
-
-              case 13:
-                if ((_step2 = _iterator2.n()).done) {
-                  _context2.next = 19;
-                  break;
-                }
-
-                _ret = _loop();
-
-                if (!(_ret === "continue")) {
-                  _context2.next = 17;
-                  break;
-                }
-
-                return _context2.abrupt("continue", 17);
-
-              case 17:
-                _context2.next = 13;
-                break;
-
-              case 19:
-                _context2.next = 24;
-                break;
-
-              case 21:
-                _context2.prev = 21;
-                _context2.t0 = _context2["catch"](10);
-
-                _iterator2.e(_context2.t0);
-
-              case 24:
-                _context2.prev = 24;
-
-                _iterator2.f();
-
-                return _context2.finish(24);
-
-              case 27:
+                this.attributes.entities.forEach(function (entity) {
+                  initializeMesh(entity);
+                  if (entity.model) return _this3.createModel(entity);
+                  return _this3.createMesh(entity);
+                });
                 /*
-                 * renders
+                RENDERS
                  */
-                this.attributes.renders = this.attributes.renders || [{}];
-                _iterator3 = _createForOfIteratorHelper(this.attributes.renders);
 
-                try {
-                  for (_iterator3.s(); !(_step3 = _iterator3.n()).done;) {
-                    _render = _step3.value;
-                    _render.scene = _render.scene || "#" + this.getElements(".scenes")[0].id;
-                    _render.camera = _render.camera || "#" + this.getElements(".cameras")[0].id;
-                    _render.renderer = _render.renderer || "#" + this.getElements(".renderers")[0].id;
-                    this.setCustomEntity(v4(), _render, ["renders"]);
-                  }
-                  /*
-                   * CONTROLS
-                   */
+                this.attributes.renders.forEach(function (render) {
+                  var _render$scene, _render$camera, _render$renderer;
 
-                } catch (err) {
-                  _iterator3.e(err);
-                } finally {
-                  _iterator3.f();
-                }
+                  (_render$scene = render.scene) !== null && _render$scene !== void 0 ? _render$scene : render.scene = "!#" + _this3.context.getElements("!.scenes")[0].id;
+                  (_render$camera = render.camera) !== null && _render$camera !== void 0 ? _render$camera : render.camera = "!#" + _this3.context.getElements("!.cameras")[0].id;
+                  (_render$renderer = render.renderer) !== null && _render$renderer !== void 0 ? _render$renderer : render.renderer = "!#" + _this3.context.getElements("!.renderers")[0].id;
+
+                  _this3.setCustomEntity(v4(), render, ["renders"]);
+                });
+                /*
+                CONTROLS
+                 */
 
                 if (this.attributes.controls && !this.attributes.controls.applied) {
-                  if (this.attributes.controls.applyTo) {
-                    this.attrs.controls.applied = true;
-                    applyElement = this.attributes.controls.applyTo;
-                  } else {
-                    applyElement = this.props.host || this.props.rootElement;
-                  }
-
-                  this.attributes.controls.selector = this.attributes.controls.selector || ".cameras";
-                  cameraElement = this.getElements(this.attributes.controls.selector)[0];
-                  controls = new OrbitControls(cameraElement.entity.object, applyElement);
+                  cameraObject = this.getObject("!.cameras");
+                  controls = new OrbitControls(cameraObject, this.props.host || this.props.rootElement);
                   controls.enableDamping = true; // an animation loop is required when either damping or auto-rotation are enabled
 
                   controls.dampingFactor = 0.5;
@@ -14781,42 +14903,17 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
                   controls.minDistance = 1;
                   controls.maxDistance = 1000;
                   controls.maxPolarAngle = Math.PI / 2;
-
-                  render = function render() {
-                    // if (
-                    //   (((controls || {}).domElement || {}).style || {}).pointerEvents ===
-                    //   "none"
-                    // ) {
-                    //   return;
-                    // }
-                    for (var i in _this2.attributes.renders) {
-                      _this2.getElements(_this2.attributes.renders[i].renderer).entity.object.render(_this2.getElements(_this2.attributes.renders[i].scene).entity.object, _this2.getElements(_this2.attributes.renders[i].camera).entity.object);
-                    }
-                  };
-
-                  raycaster = new Raycaster();
-                  mouse = new Vector2();
-
-                  onMouseMove = function onMouseMove(event) {
-                    // calculate mouse position in normalized device coordinates
-                    // (-1 to +1) for both components
-                    mouse.x = event.clientX / window.innerWidth * 2 - 1;
-                    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
-                    var camera = _this2.getElements(_this2.attributes.renders[0].camera).entity.object;
-
-                    raycaster.setFromCamera(mouse, camera); // calculate objects intersecting the picking ray
-
-                    var intersects = raycaster.intersectObjects(_this2.getElements(_this2.attributes.renders[0].scene).entity.object.children, true);
-                    console.log(intersects);
-                  };
-
-                  window.addEventListener("click", onMouseMove, false);
+                  if (this.attributes.controls.enableEvents) enableControlEvents(this);
 
                   animate = function animate() {
-                    requestAnimationFrame(animate); // controls.update(); // only required if controls.enableDamping = true, or if controls.autoRotate = true
+                    try {
+                      requestAnimationFrame(animate); // controls.update(); // only required if controls.enableDamping = true, or if controls.autoRotate = true
 
-                    render();
+                      _this3.renderLoop();
+                    } catch (e) {
+                      console.error(e);
+                      window.cancelAnimationFrame(animate);
+                    }
                   };
 
                   animate();
@@ -14824,12 +14921,12 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
 
                 this.render();
 
-              case 32:
+              case 12:
               case "end":
                 return _context2.stop();
             }
           }
-        }, _callee2, this, [[10, 21, 24, 27]]);
+        }, _callee2, this);
       }));
 
       function init() {
@@ -14839,282 +14936,78 @@ var Clip3D = /*#__PURE__*/function (_MC$BrowserClip) {
       return init;
     }()
   }, {
-    key: "pushMixer",
-    value: function pushMixer(mixer) {
-      this.context.elements.mixers.push(mixer);
-    }
-  }, {
-    key: "initializeCamera",
-    value: function initializeCamera(camera) {
-      camera.id = camera.id || v4();
-      camera["class"] = camera["class"] || [];
-      camera.settings = camera.settings || {};
-      camera["class"] = camera["class"] || [];
-      camera.settings.type = camera.settings.type || "PerspectiveCamera";
-      camera.parameters = camera.parameters || {};
-
-      if (camera.settings.type === "PerspectiveCamera") {
-        var fov = 45;
-        var aspect = this.context.rootElement.offsetWidth / this.context.rootElement.offsetHeight;
-        var near = 1;
-        var far = 10000;
-        camera.parameters = [fov, aspect, near, far];
-      } else {
-        var left = this.context.rootElement.offsetWidth / -2;
-        var right = this.context.rootElement.offsetWidth / 2;
-        var top = this.context.rootElement.offsetHeight / 2;
-        var bottom = this.context.rootElement.offsetHeight / -2;
-        var _near = 1;
-        var _far = 1000;
-        camera.parameters = [left, right, top, bottom, _near, _far];
-      }
-
-      camera.settings.position = camera.settings.position || {};
-      camera.settings.position.x = camera.settings.position.x || 0;
-      camera.settings.position.y = camera.settings.position.y || 0;
-      camera.settings.position.z = camera.settings.position.z || 10;
-      camera.settings.lookAt = _construct(Vector3, _toConsumableArray(camera.settings.lookAt || [0, 0, 0]));
-    }
-  }, {
-    key: "initializeRenderer",
-    value: function initializeRenderer(renderer) {
-      renderer.id = renderer.id || v4();
-      renderer["class"] = renderer["class"] || [];
-      renderer.settings = renderer.settings || {};
-      renderer.settings.shadowMap = renderer.settings.shadowMap || {
-        enabled: true,
-        type: PCFSoftShadowMap
-      };
-      renderer.settings.setClearColor = renderer.settings.setClearColor || ["lightblue"], renderer.settings.type = renderer.settings.type || "WebGLRenderer";
-      renderer.parameters = renderer.parameters || [{
-        alpha: true,
-        antialias: true
-      }];
-
-      if (renderer.settings.type === "WebGLRenderer") {
-        renderer.settings.setPixelRatio = renderer.settings.setPixelRatio || [this.context.window.devicePixelRatio];
-      }
-
-      renderer.settings.setSize = renderer.settings.setSize || [this.context.rootElement.offsetWidth, this.context.rootElement.offsetHeight];
-    }
-  }, {
-    key: "initializeLight",
-    value: function initializeLight(light) {
-      light.id = light.id || v4();
-      light.selector = light.selector || ".scenes";
-      light["class"] = light["class"] || [];
-      light.settings = light.settings || {};
-      light.settings.type = light.settings.type || "DirectionalLight";
-
-      if (light.settings.type === "SpotLight") {
-        light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
-        light.settings.position = light.settings.position || {
-          set: [0, 0, 50]
-        };
-        light.settings.shadow = {
-          camera: {
-            near: 0.5,
-            far: 300,
-            left: -50,
-            bottom: -50,
-            right: 50,
-            top: 50
-          },
-          bias: 0.0001,
-          mapSize: {
-            x: 1024 * 6,
-            y: 1024 * 6
-          }
-        };
-        light.settings.penumbra = light.settings.penumbra || 0.8;
-        light.parameters = light.parameters || [0xffffff, 2];
-      } else if (light.settings.type === "DirectionalLight") {
-        light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
-        light.settings.shadow = light.settings.shadow || {
-          camera: {
-            near: 0.5,
-            far: 100,
-            left: -50,
-            bottom: -50,
-            right: 50,
-            top: 50
-          },
-          bias: 0.0001,
-          mapSize: {
-            x: 1024 * 6,
-            y: 1024 * 6
-          }
-        };
-        light.settings.position = light.settings.position || {
-          set: [0, 0, 50]
-        };
-        light.parameters = light.parameters || [0xffffff, 1];
-      } else if (light.settings.type === "PointLight") {
-        light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
-        light.parameters = light.parameters || [0xffffff, 1, 100];
-        light.settings.position = light.settings.position || {
-          set: [0, 0, 50]
-        };
-        light.settings.shadow = {
-          camera: {
-            near: 0.5,
-            far: 300,
-            left: -50,
-            bottom: -50,
-            right: 50,
-            top: 50
-          },
-          bias: 0.0001,
-          mapSize: {
-            x: 512,
-            y: 512
-          }
-        };
-      } else if (light.settings.type === "AmbientLight") {
-        light.parameters = light.parameters || [0x404040];
-      } else if (light.settings.type === "HemisphereLight") {
-        light.parameters = light.parameters || [0xffffff, 0xffffff, 0.6];
-        light.settings.position = light.settings.position || {
-          set: [0, 0, 50]
-        };
-      }
-    }
-  }, {
-    key: "initializeMesh",
-    value: function initializeMesh(entity) {
-      entity.id = entity.id || v4();
-      entity["class"] = entity["class"] || [];
-      entity.selector = entity.selector || ".scenes";
-      entity.settings = entity.settings || {};
-      entity.settings.castShadow = entity.settings.castShadow || false;
-      entity.settings.receiveShadow = entity.settings.receiveShadow || false;
-      entity.settings.position = entity.settings.position || {};
-      entity.settings.position.x = entity.settings.position.x || 0;
-      entity.settings.position.y = entity.settings.position.y || 0;
-      entity.settings.position.z = entity.settings.position.z || 0;
-    }
-  }, {
-    key: "initializeCSS3DObject",
-    value: function initializeCSS3DObject(css3d) {
-      css3d.id = css3d.id || v4();
-      css3d["class"] = css3d["class"] || [];
-      css3d.selector = css3d.selector || ".scenes";
-      css3d.settings = css3d.settings || {};
-      css3d.settings.position = css3d.settings.position || {};
-      css3d.settings.position.x = css3d.settings.position.x || 0;
-      css3d.settings.position.y = css3d.settings.position.y || 0;
-      css3d.settings.position.z = css3d.settings.position.z || 0;
-    }
-  }, {
-    key: "initializeLoader",
-    value: function initializeLoader(loader) {
-      loader.id = loader.id || v4();
-      loader["class"] = loader["class"] || [];
-      loader.parameters = loader.parameters || [];
-
-      if (loader.parameters.length < 2) {
-        loader.parameters.push(null, null, function ()
-        /*xhr*/
-        {// console.log((xhr.loaded / xhr.total) * 100 + "%loaded");
-        }, function (error) {
-          throw error;
-        });
-      }
-    }
-  }, {
-    key: "initializeModel",
-    value: function initializeModel(model) {
-      model.id = model.id || v4();
-      model["class"] = model["class"] || [];
-      model.settings = model.settings || {};
-      model.settings.position = model.settings.position || {};
-      model.settings.position.x = model.settings.position.x || 0;
-      model.settings.position.y = model.settings.position.y || 0;
-      model.settings.position.z = model.settings.position.z || 0;
-    }
-  }, {
-    key: "applySettingsToObjects",
-    value: function applySettingsToObjects(settings, obj) {
-      for (var key in settings) {
-        if (settings[key] instanceof Array) {
-          obj[key].apply(obj, _toConsumableArray(settings[key]));
-          continue;
-        } else if (settings[key] !== Object(settings[key])) {
-          // is primitive
-          obj[key] = settings[key];
-          continue;
-        }
-
-        this.applySettingsToObjects(settings[key], obj[key]);
-      }
-    }
-  }, {
     key: "handleWindoResize",
     value: function handleWindoResize() {
-      var _this3 = this;
+      var _this4 = this;
 
       this.context.window.addEventListener("resize", function () {
-        var _iterator6 = _createForOfIteratorHelper(_this3.getElements(".cameras")),
-            _step6;
+        var _iterator = _createForOfIteratorHelper(_this4.getElements(".cameras")),
+            _step;
 
         try {
-          for (_iterator6.s(); !(_step6 = _iterator6.n()).done;) {
-            var camera = _step6.value;
-            camera.entity.object.aspect = _this3.context.rootElement.offsetWidth / _this3.context.rootElement.offsetHeight;
+          for (_iterator.s(); !(_step = _iterator.n()).done;) {
+            var camera = _step.value;
+            camera.entity.object.aspect = _this4.context.rootElement.offsetWidth / _this4.context.rootElement.offsetHeight;
             camera.entity.object.updateProjectionMatrix();
           }
         } catch (err) {
-          _iterator6.e(err);
+          _iterator.e(err);
         } finally {
-          _iterator6.f();
+          _iterator.f();
         }
 
-        var _iterator7 = _createForOfIteratorHelper(_this3.getElements(".renderers")),
-            _step7;
+        var _iterator2 = _createForOfIteratorHelper(_this4.getElements(".renderers")),
+            _step2;
 
         try {
-          for (_iterator7.s(); !(_step7 = _iterator7.n()).done;) {
-            var renderer = _step7.value;
-            renderer.entity.object.setSize(_this3.context.rootElement.offsetWidth, _this3.context.rootElement.offsetHeight);
+          for (_iterator2.s(); !(_step2 = _iterator2.n()).done;) {
+            var renderer = _step2.value;
+            renderer.entity.object.setSize(_this4.context.rootElement.offsetWidth, _this4.context.rootElement.offsetHeight);
           } // render the scene
 
         } catch (err) {
-          _iterator7.e(err);
+          _iterator2.e(err);
         } finally {
-          _iterator7.f();
+          _iterator2.f();
         }
 
-        for (var i in _this3.attributes.renders) {
-          _this3.attributes.renders[i].scene = _this3.attributes.renders[i].scene || "#" + _this3.getElements(".scenes")[0].id;
-          _this3.attributes.renders[i].camera = _this3.attributes.renders[i].camera || "#" + _this3.getElements(".cameras")[0].id;
-          _this3.attributes.renders[i].renderer = _this3.attributes.renders[i].renderer || "#" + _this3.getElements(".renderers")[0].id;
-
-          _this3.getElements(_this3.attributes.renders[i].renderer).entity.object.render(_this3.getElements(_this3.attributes.renders[i].scene).entity.object, _this3.getElements(_this3.attributes.renders[i].camera).entity.object);
-        }
+        _this4.renderLoop();
       });
     }
   }, {
     key: "render",
     value: function render() {
-      for (var i in this.getElements(".renderers")) {
-        var renderer = this.getElements(".renderers")[i];
-        this.context.rootElement.appendChild(renderer.entity.object.domElement);
-        renderer.entity.object.domElement.style.zIndex = i;
+      var _this5 = this;
+
+      this.context.getElements("!.renderers").forEach(function (renderer, index) {
+        _this5.context.rootElement.appendChild(renderer.entity.object.domElement);
+
+        renderer.entity.object.domElement.style.zIndex = index;
         renderer.entity.object.domElement.style.top = "0px";
         renderer.entity.object.domElement.style.position = "absolute";
-      }
+      });
+      this.renderLoop();
+    }
+  }, {
+    key: "renderLoop",
+    value: function renderLoop() {
+      var _this6 = this;
 
-      for (var _i in this.attributes.renders) {
-        this.attributes.renders[_i].scene = this.attributes.renders[_i].scene || "#" + this.getElements(".scenes")[0].id;
-        this.attributes.renders[_i].camera = this.attributes.renders[_i].camera || "#" + this.getElements(".cameras")[0].id;
-        this.attributes.renders[_i].renderer = this.attributes.renders[_i].renderer || "#" + this.getElements(".renderers")[0].id;
-        this.getElements(this.attributes.renders[_i].renderer).entity.object.render(this.getElements(this.attributes.renders[_i].scene).entity.object, this.getElements(this.attributes.renders[_i].camera).entity.object);
-      }
+      this.attributes.renders.forEach(function (render) {
+        var _render$scene2, _render$camera2, _render$renderer2;
+
+        (_render$scene2 = render.scene) !== null && _render$scene2 !== void 0 ? _render$scene2 : render.scene = "!#" + _this6.context.getElements("!.scenes")[0].id;
+        (_render$camera2 = render.camera) !== null && _render$camera2 !== void 0 ? _render$camera2 : render.camera = "!#" + _this6.context.getElements("!.cameras")[0].id;
+        (_render$renderer2 = render.renderer) !== null && _render$renderer2 !== void 0 ? _render$renderer2 : render.renderer = "!#" + _this6.context.getElements("!.renderers")[0].id;
+        /* the render function */
+
+        _this6.getObject(render.renderer).render(_this6.getObject(render.scene), _this6.getObject(render.camera));
+      });
     }
   }]);
 
   return Clip3D;
-}(MC__default['default'].BrowserClip);
+}(MC.BrowserClip);
 
 var Object3D = /*#__PURE__*/function (_MC$Effect) {
   _inherits(Object3D, _MC$Effect);
@@ -15191,18 +15084,18 @@ var Object3D = /*#__PURE__*/function (_MC$Effect) {
   return Object3D;
 }(MC__default['default'].Effect);
 
-var MAE = /*#__PURE__*/function (_MC$Effect) {
-  _inherits(MAE, _MC$Effect);
+var MorphAnimation = /*#__PURE__*/function (_Effect) {
+  _inherits(MorphAnimation, _Effect);
 
-  var _super = _createSuper(MAE);
+  var _super = _createSuper(MorphAnimation);
 
-  function MAE() {
-    _classCallCheck(this, MAE);
+  function MorphAnimation() {
+    _classCallCheck(this, MorphAnimation);
 
     return _super.apply(this, arguments);
   }
 
-  _createClass(MAE, [{
+  _createClass(MorphAnimation, [{
     key: "onGetContext",
     value: function onGetContext() {
       var _this = this;
@@ -15262,8 +15155,8 @@ var MAE = /*#__PURE__*/function (_MC$Effect) {
     }
   }]);
 
-  return MAE;
-}(MC__default['default'].Effect);
+  return MorphAnimation;
+}(MC.Effect);
 
 var compositeAttributes = {
   rotation: ["x", "y", "z", "lookAt"],
@@ -15276,10 +15169,11 @@ var index = {
     exportable: Object3D,
     name: "Object3D"
   }, {
-    exportable: MAE,
-    name: "MAE"
+    exportable: MorphAnimation,
+    name: "MorphAnimation"
   }],
   Clip: Clip3D,
+  helpers: {},
   compositeAttributes: compositeAttributes
 };
 

@@ -14726,6 +14726,21 @@ var Clip3D = /*#__PURE__*/function (_BrowserClip) {
 
         theEntity.object = model;
 
+        if (entity.children) {
+          entity.children.map(function (key) {
+            var theChild = {};
+            model.traverse(function (child) {
+              if (child.name === key) {
+                theChild = child;
+              }
+            }); //create the custom entity reference
+
+            _this2.setCustomEntity("".concat(entity.id, ".").concat(key), {
+              object: theChild
+            }, ["entities"].concat(_toConsumableArray(entity["class"]), ["child"]));
+          });
+        }
+
         _this2.getObjects(entity.selector).forEach(function (scene) {
           return scene.add(model);
         });
@@ -15058,28 +15073,19 @@ var ObjectAnimation = /*#__PURE__*/function (_Effect) {
       }
 
       if (this.attributeKey == "rotationSetY") element.rotation.y = this.targetValue;
-      if (this.attributeKey == "rotationSetY") element.rotation.y = this.targetValue;
-      if (this.attributeKey == "rotationSetY") element.rotation.y = this.targetValue;
       if (typeof this.targetValue.x !== "undefined") this.applyValue(element, "x", fraction);
       if (typeof this.targetValue.y !== "undefined" && typeof this.targetValue.y !== "string") this.applyValue(element, "y", fraction);
-      if (typeof this.targetValue.z !== "undefined") this.applyValue(element, "z", fraction); // if (typeof this.targetValue.y === "string") {
-      //   const origin = new THREE.Vector3(
-      //     element.position.x,
-      //     element.position.y + 10,
-      //     element.position.z
-      //   );
-      //   const raycaster = new THREE.Raycaster(
-      //     origin,
-      //     new THREE.Vector3(0, -1, 0)
-      //   );
-      //   const intersects = raycaster.intersectObjects(
-      //     this.context.getElements(this.targetValue.y)[0].entity.object.children,
-      //     true
-      //   );
-      //   element.position.y = ((intersects[0] || {}).point || {}).y;
-      // }
+      if (typeof this.targetValue.z !== "undefined") this.applyValue(element, "z", fraction);
+
+      if (typeof this.targetValue.y === "string") {
+        var origin = new Vector3(element.position.x, element.position.y + 10, element.position.z);
+        var raycaster = new Raycaster(origin, new Vector3(0, -1, 0));
+        var intersects = raycaster.intersectObjects(this.context.getElements(this.targetValue.y)[0].entity.object.children, true);
+        element.position.y = ((intersects[0] || {}).point || {}).y;
+      }
 
       if (this.attributeKey === "targetEntity") {
+        this.context.getElements(this.targetValue);
         element.lookAt(this.context.getElements(this.targetValue)[0].entity.object.position);
       }
     }

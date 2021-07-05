@@ -4,8 +4,11 @@ node_modules
 # Coverage
 coverage
 
+# Output files
+bundle.js
+
 # Output folders
-# dist
+dist
 build
 compiled
 .nyc_output

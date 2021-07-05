@@ -1,15 +1,10 @@
 const path = require("path");
-const webpack = require("webpack");
 
 module.exports = {
   entry: ["babel-polyfill", "./demo/index.js"],
   resolve: {
     extensions: [".js"],
     modules: [path.resolve("./"), "node_modules"],
-    fallback: {
-      fs: false,
-      path: require.resolve("path-browserify"),
-    },
   },
   output: {
     filename: "bundle.js",
@@ -27,14 +22,6 @@ module.exports = {
         test: /\.css$/,
         use: ["style-loader", "css-loader"],
       },
-      {
-        test: /\.svg$/,
-        loader: "svg-inline-loader",
-      },
-      {
-        test: /\.html$/i,
-        loader: "html-loader",
-      },
     ],
   },
   devServer: {
@@ -43,6 +30,6 @@ module.exports = {
     port: 8080,
     historyApiFallback: false,
     hot: false,
-    contentBase: "./demo",
+    contentBase: "./demo/",
   },
 };

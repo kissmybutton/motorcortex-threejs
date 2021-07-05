@@ -14458,8 +14458,10 @@ var enableControlEvents = function enableControlEvents(_this) {
     var scene = _this.getObject(_this.attributes.renders[0].scene); // calculate objects intersecting the picking ray
 
 
-    var intersects = raycaster.intersectObjects(scene.children, true);
-    console.log("INTERSECTIONS", intersects);
+    var intersects = raycaster.intersectObjects(scene.children, true); // eslint-disable-next-line no-console
+
+    console.log("INTERSECTIONS", intersects); // eslint-disable-next-line no-console
+
     console.log("CAMERA POSITION", camera.position);
   };
 
@@ -14524,6 +14526,7 @@ var initializeLight = function initializeLight(light) {
   light.type = light.type || "DirectionalLight";
 
   if (light.type === "SpotLight") {
+    // eslint-disable-next-line no-prototype-builtins
     light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
     light.settings.position = light.settings.position || {
       set: [0, 0, 50]
@@ -14546,6 +14549,7 @@ var initializeLight = function initializeLight(light) {
     light.settings.penumbra = light.settings.penumbra || 0.8;
     light.parameters = light.parameters || [0xffffff, 2];
   } else if (light.type === "DirectionalLight") {
+    // eslint-disable-next-line no-prototype-builtins
     light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
     light.settings.shadow = light.settings.shadow || {
       camera: {
@@ -14567,6 +14571,7 @@ var initializeLight = function initializeLight(light) {
     };
     light.parameters = light.parameters || [0xffffff, 1];
   } else if (light.type === "PointLight") {
+    // eslint-disable-next-line no-prototype-builtins
     light.settings.castShadow = light.settings.hasOwnProperty("castShadow") ? light.settings.castShadow : true;
     light.parameters = light.parameters || [0xffffff, 1, 100];
     light.settings.position = light.settings.position || {
@@ -15140,7 +15145,6 @@ var ObjectAnimation = /*#__PURE__*/function (_Effect) {
       }
 
       if (this.attributeKey === "targetEntity") {
-        this.context.getElements(this.targetValue);
         element.lookAt(this.context.getElements(this.targetValue)[0].entity.object.position);
       }
     }

@@ -86,7 +86,7 @@
     "babel-preset-es2015-node5": "1.2.0",
     "babel-preset-stage-0": "6.24.1",
     "path-browserify": "1.0.1",
-    "sass-loader": "10.2.0",
+    "sass-loader": "12.1.0",
     "shelljs": "0.8.4",
     "style-loader": "2.0.0",
     "svg-inline-loader": "0.8.2",
